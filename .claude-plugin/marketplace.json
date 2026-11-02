@@ -1,0 +1,14 @@
+{
+  "name": "dialogue-to-rules",
+  "owner": {
+    "name": "dialogue-to-rules"
+  },
+  "description": "Single-plugin marketplace for dialogue-to-rules.",
+  "plugins": [
+    {
+      "name": "dialogue-to-rules",
+      "source": "./",
+      "description": "Turn a user correction into a scoped, revocable rule card."
+    }
+  ]
+}

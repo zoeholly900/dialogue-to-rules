@@ -1,0 +1,7 @@
+{
+  "name": "dialogue-to-rules",
+  "version": "0.1.0",
+  "description": "You correct it once, it doesn't repeat the mistake. Turns a user correction into an evidence-backed, scoped, revocable rule in CLAUDE.md.",
+  "license": "MIT",
+  "keywords": ["rules", "claude-md", "corrections", "hooks"]
+}

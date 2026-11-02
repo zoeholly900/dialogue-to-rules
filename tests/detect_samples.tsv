@@ -1,0 +1,41 @@
+# label	text   （pos=纠错，应命中；neg=普通指令/闲聊，必须不命中。全部合成，无真人真事）
+pos	不是这个文件，是 config 目录下那个
+pos	别再给我加 emoji 了
+pos	不要再自动提交 git 了
+pos	我说的是周报，不是日报
+pos	上次说过测试要先跑再提交
+pos	你又把缩进改成 tab 了
+pos	我没让你改接口名
+pos	你理解错了，我要的是按日期排序
+pos	不对，这个函数应该返回列表
+pos	说了多少遍，变量名用英文
+pos	你怎么又忘了加类型注解
+pos	我明明说过只改这一个文件
+pos	Don't add comments to every line again.
+pos	I said use pnpm, not npm.
+pos	That's not what I asked for.
+pos	Stop doing the summary at the end.
+pos	I told you the tests live in /spec.
+pos	I didn't ask you to refactor that module.
+pos	that's not what I meant, keep the old name
+pos	不许再删我的注释
+neg	别客气，直接说哪个方案风险小
+neg	不要用图表，用表格列出来
+neg	帮我看一眼这个文件
+neg	这不是问题，只是想确认一下
+neg	程序报错了，帮我看看日志
+neg	你觉得这样对不对？
+neg	不要用 var，用 const
+neg	别绕弯子，给结论
+neg	这个函数是不是有点慢
+neg	周末不派单，留到周一
+neg	把错误处理补上
+neg	Please don't use tables here.
+neg	Can you say that again in simpler words?
+neg	I think we should stop here for today.
+neg	Don't worry about the formatting.
+neg	What did the logs say about the error?
+neg	这一段写得不错，继续
+neg	对，就这样改
+neg	我说一下需求：做一个登录页
+neg	又快又好地把这三个文件合并一下
