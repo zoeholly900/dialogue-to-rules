@@ -10,19 +10,16 @@
 
 ## 装
 
-需要 Claude Code。装法有两种，**目前只有本地路径这一种实测过**（输出原样在 [docs/安装实录_1102.md](docs/安装实录_1102.md)）。
-
-本地路径（先把仓库 clone 下来；在你要用它的项目目录里执行）：
+需要 Claude Code（1105 在 2.1.300 上实测）。两条命令，在你要用它的项目目录里执行：
 
 ```
-claude plugin install dialogue-to-rules --marketplace <本仓库的本地路径> --scope project
+claude plugin marketplace add zoeholly900/dialogue-to-rules
+claude plugin install dialogue-to-rules --scope project
 ```
 
-GitHub（**仓库公开后才可用，还没实测过**）：
+第一条会用 HTTPS 把仓库 clone 到 Claude Code 的插件缓存；第二条装进当前项目。实测输出原样在 [docs/安装实录_1102.md](docs/安装实录_1102.md) 末尾。
 
-```
-claude plugin install dialogue-to-rules --marketplace zoeholly900/dialogue-to-rules --scope project
-```
+如果你之前用本地路径加过同名 marketplace，先 `claude plugin marketplace remove dialogue-to-rules` 再加，不然第二条会装到旧路径。
 
 说明：
 
