@@ -21,7 +21,7 @@ claude plugin install dialogue-to-rules --marketplace <本仓库的本地路径>
 GitHub（**仓库公开后才可用，还没实测过**）：
 
 ```
-claude plugin install dialogue-to-rules --marketplace <owner>/<repo> --scope project
+claude plugin install dialogue-to-rules --marketplace zoeholly900/dialogue-to-rules --scope project
 ```
 
 说明：
