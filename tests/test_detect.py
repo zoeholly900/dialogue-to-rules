@@ -34,7 +34,7 @@ class DetectTest(unittest.TestCase):
     def run_hook(self, prompt, env=None):
         return subprocess.run([sys.executable, os.path.join(ROOT, "hooks", "detect.py")],
                               input=json.dumps({"prompt": prompt}), capture_output=True, text=True,
-                              env={**os.environ, **(env or {})})
+                              env={k: v for k, v in {**os.environ, **(env or {})}.items() if v != ""})
 
     def test_hook_output_on_hit(self):
         r = self.run_hook("别再给我加 emoji 了")
@@ -44,9 +44,23 @@ class DetectTest(unittest.TestCase):
         self.assertNotIn("description:", out["additionalContext"])  # frontmatter stripped
         self.assertNotIn("$", out["additionalContext"])  # placeholders filled in
 
-    def test_hook_silent_on_miss_and_when_off(self):
-        self.assertEqual(self.run_hook("帮我看一眼这个文件").stdout, "")
+    def test_hook_silent_on_miss_in_regex_mode_and_when_off(self):
+        self.assertEqual(self.run_hook("帮我看一眼这个文件", {"D2R_MODE": "regex"}).stdout, "")
         self.assertEqual(self.run_hook("别再给我加 emoji 了", {"D2R_OFF": "1"}).stdout, "")
+        self.assertEqual(self.run_hook("帮我看一眼这个文件", {"D2R_OFF": "1"}).stdout, "")
+
+    def test_nudge_on_miss_by_default(self):
+        out = json.loads(self.run_hook("帮我看一眼这个文件", {"D2R_MODE": ""}).stdout)["hookSpecificOutput"]
+        ctx = out["additionalContext"]
+        self.assertEqual(ctx, detect.NUDGE.format(root=ROOT))
+        self.assertNotIn("【规则卡】", ctx)  # the short reminder, not the whole card spec
+        self.assertTrue(os.path.isfile(os.path.join(ROOT, "commands", "d2r.md")))
+        self.assertLessEqual(len(detect.NUDGE.replace("{root}", "")), 80)
+
+    def test_nudge_mode_still_injects_full_card_on_regex_hit(self):
+        ctx = json.loads(self.run_hook("别再给我加 emoji 了")
+                         .stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("【规则卡】", ctx)
 
     def test_bad_stdin_is_silent(self):
         r = subprocess.run([sys.executable, os.path.join(ROOT, "hooks", "detect.py")],
