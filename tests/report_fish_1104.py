@@ -53,20 +53,20 @@ def table(items):
 
 
 def main():
-    with open(os.path.join(ROOT, "fixtures", "鱼真话_1104.jsonl"), encoding="utf-8") as f:
+    with open(os.path.join(ROOT, "fixtures", "real_corrections_1104.jsonl"), encoding="utf-8") as f:
         fish = [(d["text"], d["should_fire"]) for d in map(json.loads, filter(str.strip, f))]
     lines, stats = table(fish)
     x = sum(s and f for s, f in stats)
     y = sum(not s and f for s, f in stats)
-    print("# 1104 放宽后检测结果（鱼真话）\n")
-    print("> 由 `tests/report_fish_1104.py` 生成；真源 `fixtures/鱼真话_1104.jsonl`。"
+    print("# 1104 放宽后检测结果（真实纠错句）\n")
+    print("> 由 `tests/report_fish_1104.py` 生成；真源 `fixtures/real_corrections_1104.jsonl`。"
           "规则就是照这 26 句调的，所以这张表是「考过的题」，不代表新话的命中率。\n")
     print(f"**该出卡 {x}/{sum(s for s, _ in stats)} 中，不该出卡 {y}/{sum(not s for s, _ in stats)} 误报。**\n")
     print("\n".join(lines))
-    with open(os.path.join(ROOT, "fixtures", "鱼真话_1104_考题外.jsonl"), encoding="utf-8") as f:
+    with open(os.path.join(ROOT, "fixtures", "real_corrections_1104_heldout.jsonl"), encoding="utf-8") as f:
         six = [(d["text"], d["should_fire"]) for d in map(json.loads, filter(str.strip, f))]
     sl, ss = table(six)
-    print(f"\n## 考题外的鱼真话（核仔 1104 14:48 补测）\n\n正则 {sum(f for _, f in ss)}/{len(ss)} 中——"
+    print(f"\n## 考题外的真实纠错句（1104 补测）\n\n正则 {sum(f for _, f in ss)}/{len(ss)} 中——"
           "12/12 是背题背出来的。所以默认改成 nudge 模式：正则没中的每条消息都带一句短提醒，"
           "让模型自己判断要不要出卡；这几句弹不弹卡要新开窗实测。\n")
     print("\n".join(sl))

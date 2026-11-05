@@ -8,8 +8,8 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "hooks"))
 import detect  # noqa: E402
 
-FIXTURE = os.path.join(ROOT, "fixtures", "鱼真话_1104.jsonl")
-HELD_OUT = os.path.join(ROOT, "fixtures", "鱼真话_1104_考题外.jsonl")  # regex misses all six; nudge's job
+FIXTURE = os.path.join(ROOT, "fixtures", "real_corrections_1104.jsonl")
+HELD_OUT = os.path.join(ROOT, "fixtures", "real_corrections_1104_heldout.jsonl")  # regex misses all six; nudge's job
 
 
 def cases(path=FIXTURE):
