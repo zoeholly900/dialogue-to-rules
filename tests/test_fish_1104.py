@@ -48,7 +48,7 @@ class NudgeModeTest(unittest.TestCase):
             ctx = detect.context(x["text"])
             self.assertIsNotNone(ctx, x["text"])
             if detect.match(x["text"]):
-                self.assertIn("【规则卡】", ctx)
+                self.assertIn("【规则卡", ctx)
             else:
                 self.assertEqual(ctx, detect.NUDGE.format(root=detect.ROOT))
 
