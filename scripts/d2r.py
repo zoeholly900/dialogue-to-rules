@@ -8,10 +8,16 @@ Usage:
   d2r.py list [--all]
   d2r.py undo
   d2r.py render [--host claude|codex]
+  d2r.py candidates
+  d2r.py promote <c001> [--scope task|project|global]
+  d2r.py drop <c001>
 
 Storage (source of truth):
   task / project rules -> <project>/.d2r/rules.jsonl   ids r001, r002, ...
   global rules         -> ~/.d2r/rules.jsonl           ids g001, g002, ...
+Candidates (filled by hooks/sweep.py, answered by promote / drop):
+  <project>/.d2r/候选.jsonl      ids c001, c002, ...
+  <project>/.d2r/候选_已丢.jsonl  quotes the user said n to, so they are not proposed again
 Rendering: active project rules go into a managed block in <project>/CLAUDE.md
 (Codex: AGENTS.md); active global rules into ~/.claude/CLAUDE.md (Codex:
 ~/.codex/AGENTS.md). Task rules and deprecated rules are never rendered.
@@ -47,6 +53,14 @@ def home_dir():
 def store_path(is_global):
     base = home_dir() if is_global else project_dir()
     return os.path.join(base, ".d2r", "rules.jsonl")
+
+
+def cand_path():
+    return os.path.join(project_dir(), ".d2r", "候选.jsonl")
+
+
+def dropped_path():
+    return os.path.join(project_dir(), ".d2r", "候选_已丢.jsonl")
 
 
 def last_op_path():
@@ -85,6 +99,20 @@ def load(is_global):
 def save(is_global, rules):
     atomic_write(store_path(is_global),
                  "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rules))
+
+
+def load_cands():
+    text = read_text(cand_path()) or ""
+    return [json.loads(ln) for ln in text.splitlines() if ln.strip()]
+
+
+def save_cands(cands):
+    path = cand_path()
+    if not cands:
+        if os.path.exists(path):
+            os.remove(path)
+        return
+    atomic_write(path, "".join(json.dumps(c, ensure_ascii=False) + "\n" for c in cands))
 
 
 def snapshot(is_global):
@@ -160,11 +188,8 @@ def next_id(rules, prefix):
     return f"{prefix}{(max(nums) if nums else 0) + 1:03d}"
 
 
-def cmd_add(args):
-    try:
-        card = json.load(sys.stdin)
-    except ValueError as e:
-        raise SystemExit(f"stdin 不是合法 JSON：{e}")
+def add_rule(card, host):
+    """Validate a card, write it to the store and re-render. Returns the new rule."""
     scope = card.get("scope") or "task"
     if scope not in SCOPES:
         raise SystemExit(f"scope 只能是 {'/'.join(SCOPES)}")
@@ -188,7 +213,7 @@ def cmd_add(args):
         "action": (card.get("action") or "").strip(),
         "prohibit": (card.get("prohibit") or "").strip(),
         "evidence": {"quote": ev["quote"], "date": ev.get("date") or today(),
-                     "host": ev.get("host") or args.host},
+                     "host": ev.get("host") or host},
         "supersedes": supersedes,
         "deprecated_at": None,
         "reason": "",
@@ -200,8 +225,68 @@ def cmd_add(args):
             r.update(status="deprecated", deprecated_at=today(), reason=f"superseded by {rule['id']}")
     rules.append(rule)
     save(is_global, rules)
-    render(args.host)
-    print(f"{rule['id']} 已写入（范围 {scope}）" + ("；task 级只记在 .d2r/rules.jsonl，不进 md" if scope == "task" else ""))
+    render(host)
+    return rule
+
+
+def print_added(rule):
+    print(f"{rule['id']} 已写入（范围 {rule['scope']}）"
+          + ("；task 级只记在 .d2r/rules.jsonl，不进 md" if rule["scope"] == "task" else ""))
+
+
+def cmd_add(args):
+    try:
+        card = json.load(sys.stdin)
+    except ValueError as e:
+        raise SystemExit(f"stdin 不是合法 JSON：{e}")
+    print_added(add_rule(card, args.host))
+
+
+def norm_cand_id(s):
+    m = re.fullmatch(r"\s*[cC]0*(\d+)\s*", s)
+    if not m:
+        raise SystemExit(f"不认识的候选 id：{s!r}")
+    return f"c{int(m.group(1)):03d}"
+
+
+def find_cand(cid):
+    cid = norm_cand_id(cid)
+    cands = load_cands()
+    hit = [c for c in cands if c["id"] == cid]
+    if not hit:
+        raise SystemExit(f"没有候选 {cid}")
+    return hit[0], [c for c in cands if c["id"] != cid]
+
+
+def cmd_candidates(args):
+    for c in load_cands():
+        print("{} ｜当{} → {} ｜证据「{}」｜建议范围 {}".format(
+            c["id"], one_line(c["trigger"]),
+            " / ".join(([f"做 {one_line(c['action'])}"] if c.get("action") else [])
+                       + ([f"不做 {one_line(c['prohibit'])}"] if c.get("prohibit") else [])),
+            one_line(c["evidence"]["quote"]), c.get("scope", "task")))
+
+
+def cmd_promote(args):
+    """y / p / g on a candidate: write it as a rule, then clear it from the queue."""
+    cand, rest = find_cand(args.id)
+    card = {k: cand.get(k) for k in ("trigger", "action", "prohibit", "scope", "evidence")}
+    card["evidence"] = dict(cand["evidence"], date=cand.get("date") or today())
+    if args.scope:
+        card["scope"] = args.scope
+    print_added(add_rule(card, args.host))
+    save_cands(rest)
+
+
+def cmd_drop(args):
+    """n on a candidate: forget it, and remember the quote so it is not proposed again."""
+    cand, rest = find_cand(args.id)
+    save_cands(rest)
+    path = dropped_path()
+    old = read_text(path) or ""
+    atomic_write(path, old + json.dumps({"quote": cand["evidence"]["quote"], "date": today()},
+                                        ensure_ascii=False) + "\n")
+    print(f"{cand['id']} 已丢弃，没写任何规则")
 
 
 def cmd_deprecate(args):
@@ -280,9 +365,16 @@ def main(argv=None):
     ls.add_argument("--all", action="store_true")
     sub.add_parser("undo")
     sub.add_parser("render")
+    sub.add_parser("candidates")
+    pr = sub.add_parser("promote")
+    pr.add_argument("id")
+    pr.add_argument("--scope", choices=SCOPES, help="不给就用候选卡上的范围；回 p 给 project，回 g 给 global")
+    dr = sub.add_parser("drop")
+    dr.add_argument("id")
     args = p.parse_args(argv)
     {"add": cmd_add, "deprecate": cmd_deprecate, "list": cmd_list,
-     "undo": cmd_undo, "render": cmd_render}[args.cmd](args)
+     "undo": cmd_undo, "render": cmd_render, "candidates": cmd_candidates,
+     "promote": cmd_promote, "drop": cmd_drop}[args.cmd](args)
 
 
 if __name__ == "__main__":

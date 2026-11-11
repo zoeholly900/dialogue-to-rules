@@ -44,6 +44,7 @@ class NudgeModeTest(unittest.TestCase):
         os.environ.update(self.env)
 
     def test_every_fish_line_gets_card_or_nudge(self):
+        os.environ["D2R_MODE"] = "nudge"  # the default is now sweep, which injects nothing
         for x in cases() + cases(HELD_OUT):
             ctx = detect.context(x["text"])
             self.assertIsNotNone(ctx, x["text"])

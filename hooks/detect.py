@@ -3,7 +3,9 @@
 
 Reads the hook JSON from stdin and prints
 {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ...}}
-D2R_MODE=nudge (default): a regex hit injects all of commands/d2r.md; every other message gets
+D2R_MODE=sweep (default): print nothing. The conversation is swept once at the end instead
+(hooks/sweep.py on SessionEnd / PreCompact, candidates shown on SessionStart).
+D2R_MODE=nudge: a regex hit injects all of commands/d2r.md; every other message gets
 NUDGE, a one-line reminder that leaves the "is this a correction?" call to the model.
 D2R_MODE=regex: a regex hit injects d2r.md, a miss prints nothing. D2R_OFF=1 turns it all off.
 Regexes alone missed most real corrections (they only knew the phrasings we tuned them on).
@@ -89,11 +91,12 @@ def instructions(root=ROOT):
 
 def context(prompt):
     """What to inject for this prompt under the current D2R_* settings, or None."""
-    if os.environ.get("D2R_OFF") == "1":
+    mode = os.environ.get("D2R_MODE") or "sweep"
+    if os.environ.get("D2R_OFF") == "1" or mode == "sweep":
         return None
     if match(prompt):
         return instructions()
-    if os.environ.get("D2R_MODE", "nudge") == "regex":
+    if mode == "regex":
         return None
     return NUDGE.format(root=ROOT)
 
