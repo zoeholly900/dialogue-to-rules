@@ -354,7 +354,7 @@ def render_card(c):
         f"证据：「{one_line(c['evidence']['quote'])}」",
         f"我刚才：{c.get('before') or '（上次对话里的做法，略）'}",
         f"以后：当 {one_line(c['trigger'])} → {' / '.join(what)}",
-        f"范围：{c.get('scope', 'task')}（默认 task）",
+        f"范围：{c.get('scope', 'task')}",
         f"测试：{c.get('test') or '（略）'}",
         "回 y 才写入 ／ n 丢弃 ／ p 改 project ／ g 改 global",
     ])
