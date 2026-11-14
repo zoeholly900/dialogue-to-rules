@@ -53,6 +53,8 @@ JUDGE_TIMEOUT = 240
 FLUSH_WAIT = 2             # the transcript is written asynchronously; let the last lines land
 TASK_RULES_SHOWN = 20
 KNOWN_MAX_CHARS = 30000      # chars read from each known file
+THEME_MAX = 5              # a group of more than this many cards is not trusted as one thing
+THEME_SHOWN = 2            # at most this many cards of one theme per sweep
 SHOW_AT_A_TIME = 6         # cards put in front of the user per window; the rest wait in the queue
 SKIP_PREFIXES = ("<", "[Request interrupted", "This session is being continued", "Caveat:")
 
@@ -400,7 +402,7 @@ def strength(texts, cfg):
 
 
 def unmerged(cands, texts):
-    return [(c, [texts[c["_msg"]]]) for c in cands]
+    return [(c, [texts[c["_msg"]]], None) for c in cands]
 
 
 def really_known(label, known):
@@ -418,9 +420,9 @@ def merge_candidates(cands, known, texts, cfg):
     """cands are already validated (each knows its user message in c["_msg"]). One call answers yes/no
     questions per card (explicit rule? general? concrete? already known, with a quote to prove it?)
     plus scope, and groups cards that say the same thing into themes. A card stays only if explicit,
-    general, concrete are not "no" and it is not really known. Cards grouped into one theme become one
-    entry that carries every message that said it. -> entries (card, messages that said it), for pick()
-    to score in code. A broken answer falls back to one entry per card, chunk order."""
+    general, concrete are not "no" and it is not really known. Every card stays itself; cards grouped
+    into one theme (up to THEME_MAX) lend each other their voices. -> entries (card, messages that said
+    it, theme), for pick() to score in code. A broken answer falls back to one entry per card, chunk order."""
     if len(cands) <= 1:
         return unmerged(cands, texts)
     items = "\n".join("{}. 「{}」当{} → {}｜助手做错的事：{}".format(
@@ -448,45 +450,50 @@ def merge_candidates(cands, known, texts, cfg):
     theme_of = {}  # card -> the theme (list of cards) that said the same thing
     for t in (themes if isinstance(themes, list) else []):
         ids = [i for i in (t if isinstance(t, list) else []) if isinstance(i, int) and 1 <= i <= n and i not in theme_of]
-        if len(ids) >= 2:
+        if 2 <= len(ids) <= THEME_MAX:  # a bigger "theme" is the model lumping different things: ignore it
             for i in ids:
                 theme_of[i] = ids
-    entries, done = [], set()
+    entries, was_known = [], False
     for i in range(1, n + 1):
-        if i in done:
-            continue
+        lb = by_id.get(i, {})  # a card the model skipped is kept, never silently lost
         members = theme_of.get(i, [i])
-        done.update(members)
-        usable = []  # members the model did not rule out; the theme still counts every voice
-        for j in members:
-            lb = by_id.get(j, {})  # a card the model skipped is kept, never silently lost
-            if any(lb.get(k) is False for k in ("explicit", "general", "concrete")):
-                continue
-            usable.append(j)
-        if not usable or any(really_known(by_id.get(j, {}), known) for j in usable):
+        if any(really_known(by_id.get(j, {}), known) for j in members):
+            was_known = True
             continue
-        rep = usable[0]  # the model lists the clearest card of a theme first
-        c = dict(cands[rep - 1])
-        if by_id.get(rep, {}).get("scope") in d2r.SCOPES:
-            c["scope"] = by_id[rep]["scope"]
-        entries.append((c, [texts[cands[j - 1]["_msg"]] for j in members]))
-    return entries or unmerged(cands, texts)
+        if any(lb.get(k) is False for k in ("explicit", "general", "concrete")):
+            continue
+        c = dict(cands[i - 1])  # every card stays itself; its theme only lends it the other voices
+        if lb.get("scope") in d2r.SCOPES:
+            c["scope"] = lb["scope"]
+        entries.append((c, [texts[cands[j - 1]["_msg"]] for j in members], tuple(members) if len(members) > 1 else None))
+    # the model ruled out every single card and none of it was "already known": more likely a broken
+    # answer than a day with nothing in it, so fall back to every card. If things were known, empty is right.
+    return entries if entries or was_known else unmerged(cands, texts)
 
 
 def pick(entries, cfg, cap):
     """The strictness knobs, in code. A card needs repeat_times distinct voices, or one voice with a
-    keyword in it; and a score of at least min_score (score = strength, +2 if right after a mistake).
-    Highest score first, ties keep chunk order; at most cap."""
+    keyword in it; and a score of at least min_score. Highest score first, ties keep chunk order; at
+    most cap, and at most THEME_SHOWN cards of one theme (same thing, different words)."""
     scored = []
-    for n, (c, said) in enumerate(entries):
+    for n, (c, said, theme) in enumerate(entries):
         voices = len(set(said))
         score = strength(said, cfg)
         if voices < cfg["repeat_times"] and not keyword_hits(said, cfg):
             continue
         if score < cfg["min_score"]:
             continue
-        scored.append((-score, n, c))
-    return [c for _, _, c in sorted(scored, key=lambda t: t[:2])[:cap]]
+        scored.append((-score, n, c, theme))
+    out, shown = [], {}
+    for _, _, c, theme in sorted(scored, key=lambda t: t[:2]):
+        if theme is not None:
+            if shown.get(theme, 0) >= THEME_SHOWN:
+                continue
+            shown[theme] = shown.get(theme, 0) + 1
+        out.append(c)
+        if len(out) == cap:
+            break
+    return out
 
 
 def validate(cands, user_texts, seen_quotes, cap=MAX_CANDIDATES):

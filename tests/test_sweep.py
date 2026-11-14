@@ -491,19 +491,34 @@ class MergeLabelsTest(SweepBase):
             {"id": 4, "known": True, "known_as": "别让 **写的人** 自己评自己"},   # really in the user's memory
             # ids 3 and 5 skipped by the model: kept, not lost
         ], themes=[[3, 5]], known="- ⭐ **别让写的人自己评自己**（鱼 1114）→ `x`")
-        self.assertEqual(sorted(self.picked(entries)), ["原话2", "原话3"])   # 3 and 5 are one theme, shown as its first card
-        by = {c["evidence"]["quote"]: (c, m) for c, m in entries}
+        self.assertEqual(sorted(self.picked(entries)), ["原话2", "原话3", "原话5"])   # 3 and 5 each stay themselves
+        by = {c["evidence"]["quote"]: (c, m, t) for c, m, t in entries}
         self.assertEqual(by["原话2"][0]["scope"], "global")
-        self.assertEqual(by["原话3"][0]["scope"], "task")
-        self.assertEqual(sorted(by["原话3"][1]), ["原话3", "原话5"])   # the theme carries both voices
+        self.assertEqual(sorted(by["原话3"][1]), ["原话3", "原话5"])   # ...and each carries both voices
+        self.assertEqual(by["原话3"][2], (3, 5))
+
+    def test_a_known_card_takes_its_whole_theme_with_it(self):
+        entries = self.merge([{"id": 2, "known": True, "known_as": "别让写的人自己评自己"}], themes=[[1, 2, 3]], n=3,
+                             known="- 别让写的人自己评自己")
+        self.assertEqual(self.picked(entries), [])
 
     def test_a_theme_still_counts_the_voices_the_model_ruled_out(self):
         entries = self.merge([{"id": 2, "general": False}], themes=[[1, 2]], n=2)
-        (card, said), = entries
+        (card, said, _), = entries
         self.assertEqual(card["evidence"]["quote"], "原话1")
         self.assertEqual(sorted(said), ["原话1", "原话2"])
-        self.assertEqual(self.merge([{"id": 1, "concrete": False}, {"id": 2, "concrete": False}],
-                                    themes=[[1, 2]], n=2)[0][0]["evidence"]["quote"], "原话1")  # all ruled out: fallback
+
+    def test_an_oversized_theme_is_not_trusted(self):
+        n = sweep.THEME_MAX + 1
+        entries = self.merge([], themes=[list(range(1, n + 1))], n=n)
+        self.assertEqual(len(entries), n)
+        for _, said, theme in entries:
+            self.assertEqual((len(said), theme), (1, None))   # no shared voices, nothing folded
+
+    def test_at_most_two_cards_of_one_theme_are_shown(self):
+        texts = ["平淡一", "平淡二", "平淡三", "平淡四", "平淡五"]
+        entries = self.merge([], themes=[[1, 2, 3]], texts=texts)
+        self.assertEqual(self.picked(entries), ["原话1", "原话2", "原话4", "原话5"])   # the third of the theme is held back
 
     def test_known_needs_a_citation_that_is_really_in_the_known_text(self):
         known = "- 别让写的人自己评自己"
@@ -523,7 +538,7 @@ class MergeLabelsTest(SweepBase):
     def test_saying_it_again_counts_even_in_plain_words(self):
         texts = ["平淡一", "平淡二", "平淡三", "平淡四", "平淡五"]
         entries = self.merge([], themes=[[2, 4, 5]], texts=texts)
-        self.assertEqual(self.picked(entries), ["原话2", "原话1", "原话3"])   # three voices outrank the rest
+        self.assertEqual(self.picked(entries), ["原话2", "原话4", "原话1", "原话3"])   # three voices outrank the rest; 5 is the third of its theme
 
     def test_identical_messages_are_one_voice(self):
         cfg = sweep.settings()
@@ -534,7 +549,7 @@ class MergeLabelsTest(SweepBase):
         entries = self.merge([{"id": "x"}, "junk", {"id": 99}], themes=[[1, 1], "x", [2, 77], 5], n=3)
         self.assertEqual(self.picked(entries), ["原话1", "原话2", "原话3"])
         entries = self.merge([{"id": i, "concrete": False} for i in (1, 2, 3)], n=3)
-        self.assertEqual(self.picked(entries), ["原话1", "原话2", "原话3"])
+        self.assertEqual(self.picked(entries), ["原话1", "原话2", "原话3"])   # all ruled out: fall back to every card
 
 
 class ConfigTest(SweepBase):
@@ -544,7 +559,7 @@ class ConfigTest(SweepBase):
         out = []
         for i, voices in enumerate(voices_each, 1):
             card = {"trigger": "t", "action": "a", "scope": "global", "evidence": {"quote": f"原话{i}"}}
-            out.append((card, list(voices)))
+            out.append((card, list(voices), None))
         return out
 
     def pick(self, entries, cap=10):
