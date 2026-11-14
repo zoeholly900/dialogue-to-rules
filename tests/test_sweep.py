@@ -97,6 +97,7 @@ class SweepBase(unittest.TestCase):
             {"quote": QUOTE_B, "before": "没写来头就派了", "trigger": "派活", "action": "先写清为谁做",
              "prohibit": "派说不清来头的活", "scope": "weird-scope", "test": "派活时先写来头"},
         ]})
+        self.write_config({"repeat_times": 1, "min_score": 0})   # the flow tests are not about strictness
         self.env = {k: os.environ.get(k) for k in
                     ("D2R_PROJECT", "D2R_HOME", "D2R_HOST", "D2R_MODE", "D2R_OFF", "D2R_CLAUDE_BIN",
                      "D2R_SWEEP_SYNC", "D2R_SWEEP_CHILD", "FAKE_LOG", "FAKE_REPLY", "FAKE_FAIL", "FAKE_MERGE_REPLY")}
@@ -112,6 +113,12 @@ class SweepBase(unittest.TestCase):
             else:
                 os.environ[k] = v
         self.tmp.cleanup()
+
+    def write_config(self, cfg, where=None):
+        path = os.path.join(where or self.proj, ".d2r", "config.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False)
 
     def set_reply(self, obj):
         with open(self.reply, "w", encoding="utf-8") as f:
@@ -201,9 +208,12 @@ class TranscriptTest(SweepBase):
         self.assertTrue(chunks[0].startswith("[用户] 第0条"))
 
     def test_card_cap_grows_with_session_length(self):
-        self.assertEqual(sweep.max_candidates(5), sweep.MAX_CANDIDATES)
-        self.assertGreater(sweep.max_candidates(500), sweep.max_candidates(100))
-        self.assertEqual(sweep.max_candidates(5000), sweep.CANDIDATES_CEILING)
+        cfg = {"max_per_day": 10}
+        self.assertEqual(sweep.max_candidates(5, cfg), sweep.MAX_CANDIDATES)
+        self.assertGreater(sweep.max_candidates(500, cfg), sweep.max_candidates(100, cfg))
+        self.assertEqual(sweep.max_candidates(5000, cfg), 10)
+        self.assertEqual(sweep.max_candidates(5000, {"max_per_day": 25}), 25)
+        self.assertEqual(sweep.max_candidates(5, {"max_per_day": 2}), 2)
 
 
 class ValidateTest(unittest.TestCase):
@@ -462,33 +472,198 @@ class LongSessionTest(SweepBase):
 
 class MergeLabelsTest(SweepBase):
     def cards(self, n):
-        return [{"trigger": f"t{i}", "action": "a", "prohibit": "", "scope": "task",
-                 "evidence": {"quote": f"原话{i}"}} for i in range(1, n + 1)]
+        return [{"trigger": f"t{i}", "action": "a", "prohibit": "", "scope": "task", "before": "",
+                 "evidence": {"quote": f"原话{i}"}, "_msg": i - 1} for i in range(1, n + 1)]
 
-    def merge(self, labels, n=5):
-        self.set_reply({"items": labels})
-        return sweep.merge_candidates(self.cards(n), 15, "")
+    def merge(self, items, themes=(), n=5, texts=None, known="", cfg=None):
+        self.set_reply({"items": items, "themes": list(themes)})
+        return sweep.merge_candidates(self.cards(n), known, texts or [f"原话{i}" for i in range(1, n + 1)],
+                                      cfg or sweep.settings())
 
-    def quotes(self, out):
-        return [c["evidence"]["quote"] for c in out]
+    def picked(self, entries, cfg=None, cap=20):
+        cfg = dict(cfg or sweep.settings(), repeat_times=1, min_score=0)
+        return [c["evidence"]["quote"] for c in sweep.pick(entries, cfg, cap)]
 
-    def test_drop_dup_votes_and_skipped_cards_are_kept(self):
-        out = self.merge([
+    def test_drop_theme_known_and_skipped_cards(self):
+        entries = self.merge([
             {"id": 1, "explicit": False},                          # a "no" anywhere drops the card
-            {"id": 2, "explicit": True, "general": True, "concrete": True, "dup_of": None, "scope": "global"},
-            {"id": 3, "dup_of": 5},                                # folded into 5, which then ranks first
-            {"id": 4, "general": False},                           # only true for this one job
-            # id 5 skipped by the model: kept, not lost
-        ])
-        self.assertEqual(self.quotes(out), ["原话5", "原话2"])
-        self.assertEqual(out[1]["scope"], "global")
-        self.assertEqual(out[0]["scope"], "task")
+            {"id": 2, "explicit": True, "general": True, "concrete": True, "known": False, "scope": "global"},
+            {"id": 4, "known": True, "known_as": "别让 **写的人** 自己评自己"},   # really in the user's memory
+            # ids 3 and 5 skipped by the model: kept, not lost
+        ], themes=[[3, 5]], known="- ⭐ **别让写的人自己评自己**（鱼 1114）→ `x`")
+        self.assertEqual(sorted(self.picked(entries)), ["原话2", "原话3"])   # 3 and 5 are one theme, shown as its first card
+        by = {c["evidence"]["quote"]: (c, m) for c, m in entries}
+        self.assertEqual(by["原话2"][0]["scope"], "global")
+        self.assertEqual(by["原话3"][0]["scope"], "task")
+        self.assertEqual(sorted(by["原话3"][1]), ["原话3", "原话5"])   # the theme carries both voices
+
+    def test_a_theme_still_counts_the_voices_the_model_ruled_out(self):
+        entries = self.merge([{"id": 2, "general": False}], themes=[[1, 2]], n=2)
+        (card, said), = entries
+        self.assertEqual(card["evidence"]["quote"], "原话1")
+        self.assertEqual(sorted(said), ["原话1", "原话2"])
+        self.assertEqual(self.merge([{"id": 1, "concrete": False}, {"id": 2, "concrete": False}],
+                                    themes=[[1, 2]], n=2)[0][0]["evidence"]["quote"], "原话1")  # all ruled out: fallback
+
+    def test_known_needs_a_citation_that_is_really_in_the_known_text(self):
+        known = "- 别让写的人自己评自己"
+        entries = self.merge([
+            {"id": 1, "known": True},                                        # a feeling, no citation
+            {"id": 2, "known": True, "known_as": "模型凭空编的一句话"},          # citation not in the text
+            {"id": 3, "known": True, "known_as": "写的人自己评自己"},           # real
+        ], n=3, known=known)
+        self.assertEqual(sorted(self.picked(entries)), ["原话1", "原话2"])
+
+    def test_order_comes_from_the_users_own_signals_not_the_model(self):
+        texts = ["平淡的一句", "这个我说了一百遍了", "以后别这样", "平淡又一句", "平淡第三句"]
+        entries = self.merge([], texts=texts)
+        # 2 and 3 carry keywords (3 each) and keep chunk order; 1, 4, 5 have nothing
+        self.assertEqual(self.picked(entries), ["原话2", "原话3", "原话1", "原话4", "原话5"])
+
+    def test_saying_it_again_counts_even_in_plain_words(self):
+        texts = ["平淡一", "平淡二", "平淡三", "平淡四", "平淡五"]
+        entries = self.merge([], themes=[[2, 4, 5]], texts=texts)
+        self.assertEqual(self.picked(entries), ["原话2", "原话1", "原话3"])   # three voices outrank the rest
+
+    def test_identical_messages_are_one_voice(self):
+        cfg = sweep.settings()
+        self.assertEqual(sweep.strength(["一样的话", "一样的话"], cfg), sweep.strength(["一样的话"], cfg))
+        self.assertGreater(sweep.strength(["甲", "乙"], cfg), sweep.strength(["甲"], cfg))
 
     def test_junk_labels_do_not_crash_and_all_dropped_falls_back(self):
-        out = self.merge([{"id": "x"}, "junk", {"id": 99, "dup_of": 1}, {"id": 2, "dup_of": 77}], n=3)
-        self.assertEqual(self.quotes(out), ["原话1", "原话2", "原话3"])
-        out = self.merge([{"id": i, "concrete": False} for i in (1, 2, 3)], n=3)
-        self.assertEqual(self.quotes(out), ["原话1", "原话2", "原话3"])
+        entries = self.merge([{"id": "x"}, "junk", {"id": 99}], themes=[[1, 1], "x", [2, 77], 5], n=3)
+        self.assertEqual(self.picked(entries), ["原话1", "原话2", "原话3"])
+        entries = self.merge([{"id": i, "concrete": False} for i in (1, 2, 3)], n=3)
+        self.assertEqual(self.picked(entries), ["原话1", "原话2", "原话3"])
+
+
+class ConfigTest(SweepBase):
+    """.d2r/config.json: global ~/.d2r, project overrides it, nothing needed, junk ignored."""
+
+    def entries(self, *voices_each):
+        out = []
+        for i, voices in enumerate(voices_each, 1):
+            card = {"trigger": "t", "action": "a", "scope": "global", "evidence": {"quote": f"原话{i}"}}
+            out.append((card, list(voices)))
+        return out
+
+    def pick(self, entries, cap=10):
+        return [c["evidence"]["quote"] for c in sweep.pick(entries, sweep.settings(), cap)]
+
+    def test_no_file_means_the_documented_defaults(self):
+        os.remove(os.path.join(self.proj, ".d2r", "config.json"))
+        cfg = sweep.settings()
+        for k, v in sweep.DEFAULTS.items():
+            self.assertEqual(cfg[k], v)
+        self.assertEqual((cfg["max_per_day"], cfg["min_score"], cfg["repeat_times"]), (10, 3, 2))
+        self.assertEqual((cfg["chunk_model"], cfg["merge_model"]), ("claude-sonnet-5-5", "claude-opus-5-5"))
+        self.assertEqual(cfg["known_files"], [])
+        for w in ("求求", "说一百遍", "下次又", "以后", "所有窗", "通用", "别再"):
+            self.assertIn(w, sweep.keywords_of(cfg))
+
+    def test_project_overrides_global_key_by_key(self):
+        self.write_config({"max_per_day": 4, "repeat_times": 3, "chunk_model": "claude-haiku-5-5"}, self.home)
+        self.write_config({"repeat_times": 1})
+        cfg = sweep.settings()
+        self.assertEqual((cfg["max_per_day"], cfg["repeat_times"], cfg["chunk_model"]), (4, 1, "claude-haiku-5-5"))
+        self.assertEqual(cfg["min_score"], 3)   # untouched keys keep the default
+
+    def test_junk_values_and_broken_files_are_ignored_not_fatal(self):
+        self.write_config({"max_per_day": "lots", "keywords": "求求", "min_score": -1, "merge_model": " "})
+        cfg = sweep.settings()
+        self.assertEqual((cfg["max_per_day"], cfg["keywords"], cfg["min_score"], cfg["merge_model"]),
+                         (10, [], 3, "claude-opus-5-5"))
+        with open(os.path.join(self.proj, ".d2r", "config.json"), "w", encoding="utf-8") as f:
+            f.write("{坏的")
+        self.assertEqual(sweep.settings()["max_per_day"], 10)
+        self.assertIn("不是合法 JSON", self.log_text())
+
+    def test_repeat_times_one_mention_needs_a_keyword(self):
+        self.write_config({"repeat_times": 2, "min_score": 3})
+        got = self.pick(self.entries(["你以后别这样"], ["平淡一句"], ["甲", "乙"], ["甲", "甲"]))
+        # keyword alone passes; one plain voice does not; two distinct voices pass; the same message twice is one voice
+        self.assertEqual(got, ["原话1", "原话3"])
+
+    def test_own_keywords_and_points(self):
+        self.write_config({"repeat_times": 2, "keywords": ["我的口头禅"], "keyword_points": 5})
+        e = self.entries(["平淡"], ["这是我的口头禅"], ["以后"])
+        self.assertEqual(self.pick(e), ["原话2", "原话3"])           # own keyword and a default one both count
+        self.write_config({"use_default_keywords": False, "keywords": ["我的口头禅"], "repeat_times": 2})
+        self.assertEqual(self.pick(e), ["原话2"])                    # "以后" no longer counts
+
+    def test_min_score_and_max_per_day(self):
+        self.write_config({"repeat_times": 1, "min_score": 6})
+        e = self.entries(["以后别再", "说了一百遍"], ["以后"], ["平淡"])
+        self.assertEqual(self.pick(e), ["原话1"])
+        self.write_config({"repeat_times": 1, "min_score": 0, "max_per_day": 2})
+        self.assertEqual(sweep.max_candidates(500, sweep.settings()), 2)
+        self.assertEqual(len(self.pick(e, cap=2)), 2)
+
+    def test_models_come_from_the_config(self):
+        self.write_config({"chunk_model": "my-chunk-model", "merge_model": "my-merge-model"})
+        write_transcript(self.transcript, [user(f"我说过很多遍了{i}" + "字" * 300) for i in range(6)])
+        os.environ["D2R_CHUNK_CHARS"] = "400"
+        self.set_reply({"candidates": [{"quote": "我说过很多遍了0", "trigger": "t", "action": "a"},
+                                       {"quote": "我说过很多遍了1", "trigger": "t", "action": "a"}]})
+        try:
+            self.hook("SessionEnd")
+        finally:
+            os.environ.pop("D2R_CHUNK_CHARS")
+        models = {("主编" if "规则卡主编" in c["stdin"] else "筛选"): c["argv"][c["argv"].index("--model") + 1]
+                  for c in self.fake_calls()}
+        self.assertEqual(models, {"筛选": "my-chunk-model", "主编": "my-merge-model"})
+
+    def test_default_strictness_gates_a_real_sweep(self):
+        os.remove(os.path.join(self.proj, ".d2r", "config.json"))   # factory settings
+        self.hook("SessionEnd")
+        # QUOTE_A has "以后" (a default keyword) and is queued; QUOTE_B ("每次派活…") is said once with no keyword
+        self.assertEqual([c["evidence"]["quote"] for c in self.cands()], [QUOTE_A])
+        d2r.save_cands([])
+        self.set_reply({"candidates": [{"quote": "帮我把周报整理一下", "trigger": "t", "action": "a"}]})
+        os.remove(os.path.join(self.proj, ".d2r", "sweep_state.json"))
+        self.hook("SessionEnd")
+        self.assertEqual(self.cands(), [])   # one plain mention, no keyword: not queued
+
+    def test_config_command_prints_what_is_in_effect(self):
+        self.write_config({"max_per_day": 7})
+        r = subprocess.run([sys.executable, SWEEP, "config"], capture_output=True, text=True,
+                           env=os.environ.copy(), timeout=30)
+        out = json.loads(r.stdout)
+        self.assertEqual(out["effective"]["max_per_day"], 7)
+        self.assertTrue(out["files"][os.path.join(self.proj, ".d2r", "config.json")])
+
+
+class KnownMemoryTest(SweepBase):
+    def test_off_by_default_and_reads_only_what_is_pointed_at(self):
+        self.assertEqual(sweep.memory_known_block(), "")
+        mem = os.path.join(self.tmp.name, "MEMORY.md")
+        with open(mem, "w", encoding="utf-8") as f:
+            f.write("- 记过的：路径不带句号")
+        self.write_config({"known_files": [mem, os.path.join(self.tmp.name, "nope.md")]})
+        self.assertIn("路径不带句号", sweep.memory_known_block())
+        self.write_config({"known_files": ["rel.md"]})   # relative paths start from the project
+        with open(os.path.join(self.proj, "rel.md"), "w", encoding="utf-8") as f:
+            f.write("相对路径也行")
+        self.assertIn("相对路径也行", sweep.memory_known_block())
+
+    def test_memory_goes_to_the_merge_call_only(self):
+        mem = os.path.join(self.tmp.name, "MEMORY.md")
+        with open(mem, "w", encoding="utf-8") as f:
+            f.write("MEMORY-INDEX-MARKER")
+        self.write_config({"known_files": [mem], "repeat_times": 1, "min_score": 0})
+        write_transcript(self.transcript, [user("甲" * 3000 + str(i)) for i in range(4)])
+        os.environ["D2R_CHUNK_CHARS"] = "700"   # messages are shown at 600 chars: one chunk each
+        self.set_reply({"candidates": [{"quote": "甲" * 50, "trigger": "t", "action": "a"},
+                                       {"quote": "甲" * 60, "trigger": "t", "action": "a"}]})
+        try:
+            self.hook("SessionEnd")
+        finally:
+            os.environ.pop("D2R_CHUNK_CHARS")
+        calls = self.fake_calls()
+        self.assertTrue(any("规则卡筛选员" in c["stdin"] for c in calls))
+        self.assertTrue(any("规则卡主编" in c["stdin"] for c in calls))
+        for c in calls:
+            self.assertEqual("MEMORY-INDEX-MARKER" in c["stdin"], "规则卡主编" in c["stdin"])
 
 
 class QueueThrottleTest(SweepBase):

@@ -1,0 +1,11 @@
+{
+  "keywords": ["我的口头禅", "说烂了"],
+  "use_default_keywords": true,
+  "keyword_points": 3,
+  "max_per_day": 10,
+  "min_score": 3,
+  "repeat_times": 2,
+  "known_files": ["~/.claude/projects/你的项目目录/memory/MEMORY.md"],
+  "chunk_model": "claude-sonnet-5-5",
+  "merge_model": "claude-opus-5-5"
+}
