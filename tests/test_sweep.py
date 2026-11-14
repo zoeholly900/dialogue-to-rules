@@ -28,11 +28,15 @@ FAKE_CLAUDE = """#!/usr/bin/env python3
 import json, os, sys
 rec = {"argv": sys.argv[1:], "cwd": os.getcwd(), "stdin": sys.stdin.read(),
        "child": os.environ.get("D2R_SWEEP_CHILD")}
+merge = os.environ.get("FAKE_MERGE_REPLY")
 with open(os.environ["FAKE_LOG"], "a", encoding="utf-8") as f:
     f.write(json.dumps(rec, ensure_ascii=False) + "\\n")
 if os.environ.get("FAKE_FAIL"):
     sys.exit(3)
-sys.stdout.write(open(os.environ["FAKE_REPLY"], encoding="utf-8").read())
+if merge and "规则卡主编" in rec["stdin"]:
+    sys.stdout.write(open(merge, encoding="utf-8").read())
+else:
+    sys.stdout.write(open(os.environ["FAKE_REPLY"], encoding="utf-8").read())
 """
 
 
@@ -95,7 +99,7 @@ class SweepBase(unittest.TestCase):
         ]})
         self.env = {k: os.environ.get(k) for k in
                     ("D2R_PROJECT", "D2R_HOME", "D2R_HOST", "D2R_MODE", "D2R_OFF", "D2R_CLAUDE_BIN",
-                     "D2R_SWEEP_SYNC", "D2R_SWEEP_CHILD", "FAKE_LOG", "FAKE_REPLY", "FAKE_FAIL")}
+                     "D2R_SWEEP_SYNC", "D2R_SWEEP_CHILD", "FAKE_LOG", "FAKE_REPLY", "FAKE_FAIL", "FAKE_MERGE_REPLY")}
         for k in self.env:
             os.environ.pop(k, None)
         os.environ.update(D2R_PROJECT=self.proj, D2R_HOME=self.home, D2R_HOST="claude",
@@ -173,24 +177,33 @@ class TranscriptTest(SweepBase):
         joined = "\n".join(texts)
         for secret in ("TOOL-RESULT", "META-SECRET", "SIDECHAIN", "REMINDER", "SUMMARY", "command-name"):
             self.assertNotIn(secret, joined)
-        convo = sweep.build_convo(msgs)
-        self.assertIn("[助手上一条的片段]", convo)
-        self.assertLess(len(convo), 1500)
+        chunks = sweep.build_chunks(msgs)
+        self.assertEqual(len(chunks), 1)
+        self.assertIn("[助手上一条的片段]", chunks[0])
+        self.assertLess(len(chunks[0]), 1500)
 
     def test_long_assistant_tail_is_cut_to_head_and_end(self):
         t = sweep.tail("头" * 400 + "尾" * 400)
         self.assertLessEqual(len(t), sweep.TAIL_CAP + 5)
         self.assertTrue(t.startswith("头") and t.endswith("尾") and "…" in t)
 
-    def test_over_budget_drops_the_oldest(self):
-        old, sweep.BUDGET = sweep.BUDGET, 200
+    def test_over_budget_is_cut_into_chunks_and_nothing_is_dropped(self):
+        old, sweep.CHUNK_CHARS = sweep.CHUNK_CHARS, 200
         try:
             msgs = [(i, "user", f"第{i}条" + "字" * 100, "") for i in range(5)]
-            convo = sweep.build_convo(msgs)
+            chunks = sweep.build_chunks(msgs)
         finally:
-            sweep.BUDGET = old
-        self.assertIn("第4条", convo)
-        self.assertNotIn("第0条", convo)
+            sweep.CHUNK_CHARS = old
+        self.assertGreater(len(chunks), 1)
+        joined = "\n".join(chunks)
+        for i in range(5):
+            self.assertIn(f"第{i}条", joined)
+        self.assertTrue(chunks[0].startswith("[用户] 第0条"))
+
+    def test_card_cap_grows_with_session_length(self):
+        self.assertEqual(sweep.max_candidates(5), sweep.MAX_CANDIDATES)
+        self.assertGreater(sweep.max_candidates(500), sweep.max_candidates(100))
+        self.assertEqual(sweep.max_candidates(5000), sweep.CANDIDATES_CEILING)
 
 
 class ValidateTest(unittest.TestCase):
@@ -213,6 +226,7 @@ class ValidateTest(unittest.TestCase):
         texts = ["甲乙丙丁戊己庚"]
         cands = [{"quote": q, "trigger": "t", "action": "a"} for q in "甲乙丙丁戊"]
         self.assertEqual(len(sweep.validate(cands, texts, set())), sweep.MAX_CANDIDATES)
+        self.assertEqual(len(sweep.validate(cands, texts, set(), cap=5)), 5)
         self.assertEqual(sweep.validate(cands[:1], texts, {"甲"}), [])
 
     def test_parse_tolerates_wrapping_and_rejects_junk(self):
@@ -236,7 +250,7 @@ class FullFlowTest(SweepBase):
         self.assertEqual(d2r.load(False), [])
         # the judge was called the way the work order says, from a clean directory
         call, = self.fake_calls()
-        self.assertEqual(call["argv"][:4], ["-p", "--model", "claude-haiku-5-5", "--tools"])
+        self.assertEqual(call["argv"][:4], ["-p", "--model", "claude-sonnet-5-5", "--tools"])
         for flag in ("--setting-sources", "--no-session-persistence", "--strict-mcp-config"):
             self.assertIn(flag, call["argv"])
         self.assertNotEqual(os.path.realpath(call["cwd"]), os.path.realpath(self.proj))
@@ -360,6 +374,134 @@ class FullFlowTest(SweepBase):
                 break
             time.sleep(0.1)
         self.assertEqual(len(self.cands()), 2)
+
+
+class LongSessionTest(SweepBase):
+    """A day-long session: read in chunks, merged, ranked; nothing from the early part is lost."""
+
+    def write_long(self, n=40):  # 12 KB chunks would be one chunk here, so setUp shrinks them
+        lines = []
+        for i in range(n):
+            lines.append(user(f"第{i}条，说点别的事情" + "字" * 60))
+            lines.append(assistant("好。"))
+        lines.insert(3, user("早上说的：没用的入口直接删，不然误导其他伙计"))
+        lines.append(user("傍晚说的：别让写的人自己检查自己，找别家来看"))
+        write_transcript(self.transcript, lines)
+
+    def setUp(self):
+        super().setUp()
+        self.old = sweep.CHUNK_CHARS
+        sweep.CHUNK_CHARS = 800
+        os.environ["D2R_CHUNK_CHARS"] = "800"  # the hook runs as a subprocess
+
+    def tearDown(self):
+        sweep.CHUNK_CHARS = self.old
+        os.environ.pop("D2R_CHUNK_CHARS", None)
+        super().tearDown()
+
+    def card(self, quote, **kw):
+        return {"quote": quote, "trigger": "t " + quote[:6], "action": "a", "scope": "global", **kw}
+
+    def test_every_chunk_is_judged_then_merged_and_the_early_part_counts(self):
+        self.write_long()
+        self.set_reply({"candidates": [self.card("没用的入口直接删，不然误导其他伙计"),
+                                       self.card("别让写的人自己检查自己，找别家来看")]})
+        merge = os.path.join(self.tmp.name, "merge.json")
+        with open(merge, "w", encoding="utf-8") as f:
+            json.dump({"items": [{"id": 1, "explicit": True, "dup_of": None, "scope": "project"},
+                                 {"id": 2, "explicit": True, "dup_of": None, "scope": "global"}]}, f)
+        os.environ["FAKE_MERGE_REPLY"] = merge
+        self.hook("SessionEnd")
+        calls = self.fake_calls()
+        judges = [c for c in calls if "规则卡筛选员" in c["stdin"]]
+        merges = [c for c in calls if "规则卡主编" in c["stdin"]]
+        self.assertGreater(len(judges), 2)
+        self.assertEqual(len(merges), 1)
+        seen = "\n".join(c["stdin"] for c in judges)
+        self.assertIn("早上说的", seen)
+        self.assertIn("傍晚说的", seen)
+        cands = self.cands()
+        # chunk order, scope comes from the merge step
+        self.assertEqual([c["evidence"]["quote"] for c in cands],
+                         ["没用的入口直接删，不然误导其他伙计", "别让写的人自己检查自己，找别家来看"])
+        self.assertEqual([c["scope"] for c in cands], ["project", "global"])
+        self.assertIn("40 条用户消息".replace("40", str(len(sweep.read_transcript(self.transcript)))), self.log_text())
+
+    def test_a_broken_merge_falls_back_to_chunk_order_and_cap(self):
+        self.write_long()
+        self.set_reply({"candidates": [self.card("没用的入口直接删，不然误导其他伙计")]})
+        merge = os.path.join(self.tmp.name, "merge.json")
+        with open(merge, "w", encoding="utf-8") as f:
+            f.write("我不会输出 JSON")
+        os.environ["FAKE_MERGE_REPLY"] = merge
+        self.hook("SessionEnd")
+        self.assertEqual([c["evidence"]["quote"] for c in self.cands()],
+                         ["没用的入口直接删，不然误导其他伙计"])
+
+    def test_one_failed_chunk_keeps_the_rest_and_rereads_next_time(self):
+        self.write_long()
+        self.set_reply({"candidates": [self.card("没用的入口直接删，不然误导其他伙计")]})
+        real = sweep.call_judge
+        n = {"i": 0}
+
+        def flaky(prompt, model=None):
+            n["i"] += 1
+            if n["i"] == 2:
+                raise RuntimeError("boom")
+            return real(prompt, model)
+        sweep.call_judge = flaky
+        try:
+            sweep.use_project(self.proj)
+            sweep.sweep(self.transcript, "sess-0001-abcd")
+        finally:
+            sweep.call_judge = real
+        self.assertEqual(len(self.cands()), 1)
+        self.assertEqual(sweep.load_state().get("sessions", {}), {})  # not marked as done
+        self.assertIn("没判成", self.log_text())
+
+
+class MergeLabelsTest(SweepBase):
+    def cards(self, n):
+        return [{"trigger": f"t{i}", "action": "a", "prohibit": "", "scope": "task",
+                 "evidence": {"quote": f"原话{i}"}} for i in range(1, n + 1)]
+
+    def merge(self, labels, n=5):
+        self.set_reply({"items": labels})
+        return sweep.merge_candidates(self.cards(n), 15, "")
+
+    def quotes(self, out):
+        return [c["evidence"]["quote"] for c in out]
+
+    def test_drop_dup_votes_and_skipped_cards_are_kept(self):
+        out = self.merge([
+            {"id": 1, "explicit": False},                          # a "no" anywhere drops the card
+            {"id": 2, "explicit": True, "general": True, "concrete": True, "dup_of": None, "scope": "global"},
+            {"id": 3, "dup_of": 5},                                # folded into 5, which then ranks first
+            {"id": 4, "general": False},                           # only true for this one job
+            # id 5 skipped by the model: kept, not lost
+        ])
+        self.assertEqual(self.quotes(out), ["原话5", "原话2"])
+        self.assertEqual(out[1]["scope"], "global")
+        self.assertEqual(out[0]["scope"], "task")
+
+    def test_junk_labels_do_not_crash_and_all_dropped_falls_back(self):
+        out = self.merge([{"id": "x"}, "junk", {"id": 99, "dup_of": 1}, {"id": 2, "dup_of": 77}], n=3)
+        self.assertEqual(self.quotes(out), ["原话1", "原话2", "原话3"])
+        out = self.merge([{"id": i, "concrete": False} for i in (1, 2, 3)], n=3)
+        self.assertEqual(self.quotes(out), ["原话1", "原话2", "原话3"])
+
+
+class QueueThrottleTest(SweepBase):
+    def test_only_a_few_cards_are_shown_per_window_the_rest_wait(self):
+        d2r.save_cands([{"id": f"c{i:03d}", "trigger": f"t{i}", "action": "a", "prohibit": "",
+                         "scope": "global", "evidence": {"quote": f"原话{i}"}} for i in range(1, 11)])
+        text = json.loads(self.hook("SessionStart", {"source": "startup"}).stdout
+                          )["hookSpecificOutput"]["additionalContext"]
+        self.assertEqual(text.count("【规则卡·候选"), sweep.SHOW_AT_A_TIME)
+        self.assertIn("c001", text)
+        self.assertNotIn("c007", text)
+        self.assertIn(f"另有 {10 - sweep.SHOW_AT_A_TIME} 张在排队", text)
+        self.assertIn("扫出 10 张", text)
 
 
 class SessionStartTest(SweepBase):
