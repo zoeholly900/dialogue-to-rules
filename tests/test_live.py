@@ -5,6 +5,7 @@ import io
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -15,6 +16,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "hooks"))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
+import banner  # noqa: E402
 import d2r  # noqa: E402
 import live  # noqa: E402
 
@@ -22,8 +24,14 @@ LIVE = os.path.join(ROOT, "hooks", "live.py")
 D2R = os.path.join(ROOT, "scripts", "d2r.py")
 
 CORRECTION = "你又把路径后面带了句号，以后给我路径都单独一行，后面别跟标点"
-REPLY = ("好的，改了：\n/Users/x/a.md\n/Users/x\n\n"
-         "📌 记下了：当给用户文件路径就单独一行、后面不跟标点。不要就说「撤」")
+RULE, WHERE = "给路径单独一行不跟标点", "给用户任何文件或文件夹路径时"
+
+
+def line(rule=RULE, where=WHERE, everywhere=False):
+    return f"📌 记下了{'（所有项目）' if everywhere else ''}：{rule}｜适用：{where}。不要就说「撤」"
+
+
+REPLY = "好的，改了：\n/Users/x/a.md\n/Users/x\n\n" + line()
 
 
 class LiveBase(unittest.TestCase):
@@ -86,27 +94,37 @@ class LiveBase(unittest.TestCase):
 
 class ParseTest(unittest.TestCase):
     def test_the_line_and_its_variants(self):
-        self.assertEqual(live.marks(REPLY), [("当给用户文件路径就单独一行、后面不跟标点", False)])
-        self.assertEqual(live.marks("**📌 记下了（所有项目）**：当派活，就先写来头。不要的话就说「撤」"),
-                         [("当派活，就先写来头", True)])
-        self.assertEqual(live.marks("- 📌 记下了：当额度<30%就只收尾。不要就说'撤'"), [("当额度<30%就只收尾", False)])
+        self.assertEqual(live.marks(REPLY), [(f"{RULE}｜适用：{WHERE}", False)])
+        self.assertEqual(live.marks("**📌 记下了（所有项目）**：派活先写来头｜适用：派任何活时。不要的话就说「撤」"),
+                         [("派活先写来头｜适用：派任何活时", True)])
+        self.assertEqual(live.marks("- 📌 记下了：额度<30%只收尾｜适用：开新活前。不要就说'撤'"),
+                         [("额度<30%只收尾｜适用：开新活前", False)])
 
     def test_templates_code_and_other_pins_are_not_rules(self):
-        for text in ("📌 记下了：当<什么情形>就<怎么做>。不要就说「撤」",
-                     "📌 记下了：当……就……。不要就说「撤」",
-                     "```\n📌 记下了：当甲就乙。不要就说「撤」\n```",
-                     "📌 之前还记下了：当甲就乙。不要就说「撤」",
-                     "我会在末尾写 📌 记下了：当甲就乙"):  # not at the start of a line
+        for text in ("📌 记下了：<规矩一句话>｜适用：<什么时候照做>。不要就说「撤」",
+                     "📌 记下了：……｜适用：……。不要就说「撤」",
+                     "```\n" + line() + "\n```",
+                     "📌 之前还记下了：甲｜适用：乙。不要就说「撤」",
+                     "我会在末尾写 " + line()):  # not at the start of a line
             self.assertEqual(live.marks(text), [], text)
 
-    def test_card_from_the_line(self):
-        self.assertEqual(live.to_card("当派活，就先写来头"), {"trigger": "派活", "action": "先写来头", "prohibit": ""})
-        self.assertEqual(live.to_card("当给路径就不要带句号"), {"trigger": "给路径", "action": "", "prohibit": "带句号"})
-        self.assertEqual(live.to_card("汇报先说结论")["action"], "汇报先说结论")
+    def test_gate_two_parts_within_limits(self):
+        card, wrong = live.to_card(f"{RULE}｜适用：{WHERE}")
+        self.assertIsNone(wrong)
+        self.assertEqual((card["title"], card["applies"]), (RULE, WHERE))
+        self.assertEqual(live.to_card("派活先写来头 | 适用: 派任何活时。")[0]["applies"], "派任何活时")
+        _, wrong = live.to_card("当给路径就单独一行、后面不跟标点")  # the 0.3.1 shape
+        self.assertIn("没按两段写", wrong)
+        _, wrong = live.to_card("给路径单独一行不跟标点｜适用：给路径时｜不适用：代码块")  # a third part
+        self.assertIn("没按两段写", wrong)
+        _, wrong = live.to_card("给用户的任何文件路径都要单独一行而且不跟标点｜适用：给路径时")
+        self.assertIn("规矩 22 字，超过 16", wrong)
+        _, wrong = live.to_card("给路径单独一行｜适用：给用户任何文件、文件夹、网址、命令输出里的路径时")
+        self.assertIn("适用 24 字，超过 20", wrong)
 
     def test_long_message_evidence_is_the_closest_sentence_verbatim(self):
         msg = "今天先这样。" + "别的事情说了很多很多。" * 20 + "以后给我路径都单独一行，后面别跟标点。" + "收工吧。"
-        q = live.best_quote(msg, live.to_card("当给用户路径就单独一行、后面不跟标点"))
+        q = live.best_quote(msg, live.to_card(f"{RULE}｜适用：{WHERE}")[0])
         self.assertIn("路径都单独一行", q)
         self.assertIn(q, msg)
 
@@ -116,17 +134,17 @@ class CorrectionTurnTest(LiveBase):
         self.assertIsNone(self.turn(CORRECTION, REPLY))
         r, = self.active()
         self.assertEqual((r["id"], r["scope"], r["source"]), ("r001", "project", "live"))
-        self.assertEqual(r["trigger"], "给用户文件路径")
-        self.assertEqual(r["action"], "单独一行、后面不跟标点")
+        self.assertEqual((r["title"], r["applies"]), (RULE, WHERE))
+        self.assertNotIn("format", r)
         self.assertEqual(r["evidence"]["quote"], CORRECTION)
-        self.assertIn("[r001] 当给用户文件路径", self.md())  # default-on: in CLAUDE.md with nobody answering
+        self.assertIn(f"[r001] {RULE} ｜适用 {WHERE} ｜证据", self.md())  # default-on: in CLAUDE.md, nobody answered
         self.assertEqual(self.md(True), "")
 
     def test_all_projects_goes_global(self):
-        self.turn("所有窗都一样，派活先写来头", "好。\n📌 记下了（所有项目）：当派活就先写清为谁做。不要就说「撤」")
+        self.turn("所有窗都一样，派活先写来头", "好。\n" + line("派活先写清为谁做", "派任何活时", everywhere=True))
         self.assertEqual(self.active(), [])
         self.assertEqual(self.active(True)[0]["id"], "g001")
-        self.assertIn("先写清为谁做", self.md(True))
+        self.assertIn("派活先写清为谁做", self.md(True))
 
     def test_no_line_no_rule_and_no_output(self):
         self.assertIsNone(self.turn("帮我看看这个文件", "看完了，没问题。"))
@@ -150,7 +168,7 @@ class CorrectionTurnTest(LiveBase):
 
     def test_a_rule_that_could_not_be_stored_is_reported(self):
         os.makedirs(os.path.join(self.home, ".claude", "CLAUDE.md"))  # a directory: rendering fails
-        out = self.turn("以后都这样", "好。\n📌 记下了（所有项目）：当甲就乙。不要就说「撤」")
+        out = self.turn("以后都这样", "好。\n" + line("先甲后乙", "做丙时", everywhere=True))
         self.assertIn("没记上", out["systemMessage"])
 
     def test_off_does_nothing(self):
@@ -172,6 +190,49 @@ class CorrectionTurnTest(LiveBase):
         self.assertEqual(len(self.active()), 1)
 
 
+class GateTest(LiveBase):
+    """The card is a code gate, not a request: 规矩 ≤16 ｜适用：≤20, or it is sent back once."""
+    def test_compliant_line_is_written_as_is(self):
+        self.assertIsNone(self.turn(CORRECTION, REPLY))
+        r, = self.active()
+        self.assertEqual((r["title"], r["applies"], r.get("format")), (RULE, WHERE, None))
+
+    def test_missing_part_is_sent_back_and_the_fixed_line_is_written(self):
+        out = self.turn(CORRECTION, "好的。\n📌 记下了：当给路径就单独一行、后面不跟标点。不要就说「撤」")
+        self.assertEqual(out["decision"], "block")  # the model goes on in this same turn
+        self.assertIn("没按两段写", out["reason"])
+        self.assertIn("📌 记下了：<规矩一句话>｜适用：<什么时候照做>。不要就说「撤」", out["reason"])
+        self.assertEqual(d2r.load(False), [])  # nothing written yet
+        self.assertEqual(self.notified(), [])
+        self.assertIsNone(self.hook("Stop", last_assistant_message=line(), stop_hook_active=True))
+        r, = self.active()
+        self.assertEqual((r["title"], r.get("format"), r["evidence"]["quote"]), (RULE, None, CORRECTION))
+        self.assertIsNotNone(self.prompt("撤"))  # 撤 still takes back what this turn wrote
+
+    def test_too_long_is_sent_back_once_then_kept_cut_and_marked(self):
+        long_line = "📌 记下了：给用户的任何文件路径都要单独一行而且不跟标点｜适用：给路径时。不要就说「撤」"
+        out = self.turn(CORRECTION, "好。\n" + long_line)
+        self.assertIn("规矩 22 字，超过 16", out["reason"])
+        self.assertIsNone(self.hook("Stop", last_assistant_message="好，我再想想。", stop_hook_active=True))
+        r, = self.active()  # the fix never came: written anyway, cut to size, the whole line kept
+        self.assertEqual(r["format"], "格式不全")
+        self.assertEqual(len(r["title"]), live.TITLE_MAX)
+        self.assertTrue(r["title"].endswith("…"))
+        self.assertEqual(r["raw"], "给用户的任何文件路径都要单独一行而且不跟标点｜适用：给路径时")
+        self.assertIn(f"[r001] {r['raw']} ｜证据", self.md())  # the model reads the whole line
+        self.assertIn("格式不全", d2r.read_text(os.path.join(self.home, ".d2r", "规矩本.html")))
+
+    def test_never_sent_back_twice(self):
+        bad = "好。\n📌 记下了：当甲就乙。不要就说「撤」"
+        self.assertEqual(self.turn("以后这样", bad)["decision"], "block")
+        self.assertIsNone(self.hook("Stop", last_assistant_message=bad, stop_hook_active=True))
+        self.assertEqual(self.active()[0]["format"], "格式不全")
+        # a Stop that is already a continuation (another hook blocked) is never blocked by us
+        self.assertIsNone(self.hook("Stop", last_assistant_message="📌 记下了：当丙就丁。不要就说「撤」",
+                                    stop_hook_active=True))
+        self.assertEqual(len(self.active()), 2)
+
+
 class RetractTest(LiveBase):
     def test_che_right_after_the_line_deprecates_it(self):
         self.turn(CORRECTION, REPLY)
@@ -185,7 +246,7 @@ class RetractTest(LiveBase):
 
     def test_other_ways_of_saying_it(self):
         for i, word in enumerate(("不要这条", "撤。", "这条不要了", "别记")):
-            self.turn(f"纠正{i}", f"好。\n📌 记下了：当情形{i}就做{i}。不要就说「撤」")
+            self.turn(f"纠正{i}", "好。\n" + line(f"做事{i}", f"情形{i}"))
             self.assertIsNotNone(self.prompt(word), word)
         self.assertEqual(self.active(), [])
 
@@ -209,8 +270,8 @@ class RetractTest(LiveBase):
         self.assertEqual(len(self.active()), 1)
 
     def test_cli_retract_takes_the_newest(self):
-        self.turn("a", "📌 记下了：当甲就乙。不要就说「撤」")
-        self.turn("b", "📌 记下了（所有项目）：当丙就丁。不要就说「撤」")
+        self.turn("a", line("先甲", "做乙时"))
+        self.turn("b", line("先丙", "做丁时", everywhere=True))
         out = subprocess.run([sys.executable, D2R, "retract"], capture_output=True, text=True, env=os.environ.copy())
         self.assertIn("已撤 g001", out.stdout)
         self.assertEqual([r["id"] for r in self.active()], ["r001"])
@@ -220,11 +281,13 @@ class RetractTest(LiveBase):
 
 
 class NotifyTest(LiveBase):
-    def test_a_written_rule_shows_a_banner(self):
+    def test_a_written_rule_shows_the_rule_first_then_where_it_applies(self):
         self.turn(CORRECTION, REPLY)
         b, = self.notified()
-        self.assertEqual({k: b[k] for k in ("title", "body", "subtitle")},
-                         {"title": "记下一条规矩", "body": "当给用户文件路径就单独一行、后面不跟标点", "subtitle": "不要就回「撤」"})
+        self.assertEqual((b["title"], b["subtitle"], b["buttons"], b["rule"]),
+                         ("规矩+1：" + RULE, "适用：" + WHERE, True, "r001"))
+        self.assertEqual(b["body"], "不要就点「撤」，点「看看」看规矩本")
+        self.assertNotIn("不适用", json.dumps(b, ensure_ascii=False))
 
     def test_clicking_opens_the_book_at_that_rule(self):
         self.turn(CORRECTION, REPLY)
@@ -236,20 +299,11 @@ class NotifyTest(LiveBase):
         book = d2r.read_text(os.path.join(self.home, ".d2r", "规矩本.html"))
         self.assertIn(f'id="{a}"', book)
 
-    def test_all_projects_says_so_and_long_rules_are_cut(self):
-        self.turn("以后所有窗都这样", "好\n📌 记下了（所有项目）：当派活，就先写清这活为谁做、解决谁的什么痛点、做完要达到什么目标，"
-                  "窗名写清在干什么、谁要的、哪天派的，做完回报时单列一段自己默认了什么、哪里没实测。不要就说「撤」")
-        b, = self.notified()
-        self.assertEqual(b["title"], "记下一条规矩（所有项目）")
-        self.assertEqual(len(b["body"]), live.NOTIFY_CHARS)
-        self.assertTrue(b["body"].endswith("…"))
-
-    def test_che_shows_a_banner_too(self):
+    def test_che_shows_rule_minus_one(self):
         self.turn(CORRECTION, REPLY)
         self.prompt("撤")
         b = self.notified()[-1]
-        self.assertEqual((b["title"], b["subtitle"]), ("已撤", ""))
-        self.assertTrue(b["body"].startswith("已撤：当给用户文件路径"))
+        self.assertEqual((b["title"], b["body"], b["buttons"]), ("规矩-1：" + RULE, "已撤，以后不再照做", False))
 
     def test_nothing_written_nothing_shown(self):
         self.turn("帮我看一眼", "看了，没问题")
@@ -257,7 +311,7 @@ class NotifyTest(LiveBase):
         self.turn(CORRECTION, REPLY)  # already a rule: written once, shown once
         self.prompt("撤")
         self.prompt("撤")  # nothing left to take back
-        self.assertEqual([b["title"] for b in self.notified()], ["记下一条规矩", "已撤"])
+        self.assertEqual([b["title"][:5] for b in self.notified()], ["规矩+1：", "规矩-1："])
 
     def test_notify_off(self):
         self.turn(CORRECTION, REPLY, env={"D2R_NOTIFY": "0"})
@@ -265,19 +319,65 @@ class NotifyTest(LiveBase):
         self.assertEqual(len(self.active()), 1)
 
 
+class ButtonTest(LiveBase):
+    """What the background waiter does with alerter's answer."""
+    def spec(self):
+        self.turn(CORRECTION, REPLY)
+        return self.notified()[0]
+
+    def test_che_button_takes_back_that_very_rule(self):
+        spec = self.spec()
+        self.assertEqual(banner.act("撤", spec), "撤")
+        r, = d2r.load(False)
+        self.assertEqual((r["status"], r["reason"]), ("deprecated", "用户点了通知上的「撤」"))
+        self.assertEqual(self.notified()[-1]["title"], "规矩-1：" + RULE)
+        self.assertNotIn("[r001]", self.md())
+
+    def test_kankan_or_a_click_on_the_banner_opens_the_book(self):
+        spec = self.spec()
+        for answer in ("看看", "@CONTENTCLICKED"):
+            self.assertEqual(banner.act(answer, spec), "看看")
+            self.assertEqual(self.notified()[-1], {"opened": spec["open"]})
+        self.assertEqual(len(self.active()), 1)
+
+    def test_no_click_leaves_the_rule_alone(self):
+        spec = self.spec()
+        for answer in ("@TIMEOUT", "@CLOSED", "好的", ""):
+            self.assertIsNone(banner.act(answer, spec))
+        self.assertEqual(len(self.active()), 1)
+        self.assertEqual(len(self.notified()), 1)
+
+    def test_alerter_args_follow_its_own_help(self):
+        for helptext, d in (("-actions VALUE", "-"), ("--actions VALUE", "--")):
+            exe = os.path.join(self.tmp.name, "alerter")
+            with open(exe, "w") as f:
+                f.write(f"#!/bin/sh\necho '{helptext}'\n")
+            os.chmod(exe, 0o755)
+            args = banner.alerter_args(exe, self.spec() if d == "-" else self.notified()[0])
+            self.assertIn(d + "actions", args)
+            self.assertEqual(args[args.index(d + "actions") + 1], "撤,看看")
+            self.assertEqual(args[args.index(d + "closeLabel") + 1], "好的")
+            self.assertEqual(args[args.index(d + "title") + 1], "规矩+1：" + RULE)
+            self.assertEqual(args[args.index(d + "subtitle") + 1], "适用：" + WHERE)
+
+
 class BookTest(LiveBase):
     def test_book_has_every_rule_newest_first_with_what_to_say(self):
         self.turn(CORRECTION, REPLY)
-        self.turn("以后所有窗派活都先写来头", "好\n📌 记下了（所有项目）：当派活就先写清为谁做。不要就说「撤」")
+        self.turn("以后所有窗派活都先写来头", "好\n" + line("派活先写清为谁做", "派任何活时", everywhere=True))
         self.prompt("撤")
         other = os.path.join(self.tmp.name, "other")
         os.makedirs(other)
-        self.turn("又忘了，以后这个仓库提交前先跑测试", "好\n📌 记下了：当提交前就先跑测试。不要就说「撤」",
+        self.turn("又忘了，以后这个仓库提交前先跑测试", "好\n" + line("提交前先跑测试", "这个仓库每次提交"),
                   session="s2", env={"D2R_PROJECT": other}, cwd=other)
         book = d2r.read_text(os.path.join(self.home, ".d2r", "规矩本.html"))
-        order = [book.index(x) for x in ("当提交前就先跑测试", "当派活就先写清为谁做", "当给用户文件路径")]
+        order = [book.index(x) for x in ("提交前先跑测试", "派活先写清为谁做", RULE)]
         self.assertEqual(order, sorted(order))  # newest on top, across projects
-        self.assertIn("证据：「" + CORRECTION + "」", book)
+        self.assertIn("「" + CORRECTION + "」", book)
+        for col in ("<dt>规矩</dt>", "<dt>适用</dt>", "<dt>证据原话</dt>"):
+            self.assertIn(col, book)
+        self.assertNotIn("不适用", book)
+        self.assertIn("AI 被你纠正一次就记下，下次照做；不要就撤。", book)
         self.assertIn("已撤", book)
         self.assertIn("所有项目", book)
         self.assertIn("项目 proj", book)
@@ -285,11 +385,24 @@ class BookTest(LiveBase):
         self.assertIn("在 proj 的窗里说「把 r001 撤了」", book)
         self.assertIn("生效 2 条，已撤 1 条", book)
 
-    def test_text_is_escaped(self):
-        self.turn("以后别再这样", "好\n📌 记下了：当写 <script>alert(1)</script> 时就转义。不要就说「撤」")
+    def test_old_rules_are_shown_as_they_were(self):
+        sys.stdin, old = io.StringIO(json.dumps({"trigger": "给路径", "action": "单独一行", "scope": "project",
+                                                 "evidence": {"quote": "原话"}})), sys.stdin
+        try:
+            with redirect_stdout(io.StringIO()):
+                d2r.main(["add"])
+        finally:
+            sys.stdin = old
         book = d2r.read_text(os.path.join(self.home, ".d2r", "规矩本.html"))
-        self.assertNotIn("<script>alert", book)
-        self.assertIn("&lt;script&gt;", book)
+        self.assertIn("当给路径就单独一行", book)
+        self.assertIn("证据：「原话」", book)
+
+    def test_text_is_escaped(self):
+        self.turn("以后别再这样", "好\n" + line("<i>别用</i>斜体", "<script>写网页时"))
+        book = d2r.read_text(os.path.join(self.home, ".d2r", "规矩本.html"))
+        self.assertNotIn("<i>别用", book)
+        self.assertNotIn("<script>写", book)
+        self.assertIn("&lt;i&gt;别用&lt;/i&gt;斜体", book)
 
     def test_saying_guijuben_gets_the_path(self):
         self.turn(CORRECTION, REPLY)
@@ -307,58 +420,57 @@ class BookTest(LiveBase):
 
 class NotifierTest(unittest.TestCase):
     def test_fallback_says_how_to_see_everything(self):
-        self.assertEqual(live.BOOK_HINT, "\n看全部：说「规矩本」")
+        self.assertEqual(banner.BOOK_HINT, "\n看全部：说「规矩本」")
+        self.assertTrue(banner.body_for(None, "plain").endswith(banner.BOOK_HINT))
+        self.assertNotIn("点「撤」", banner.body_for(None, "click"))  # no button, no 点「撤」
 
     def test_install_never_reaches_outside_the_plugin(self):
-        for p in (live.VENDOR, live.TN_APP, live.TN_BIN, live.TN_STATE):
-            self.assertTrue(p.startswith(ROOT + os.sep))
-        self.assertTrue(live.TN_URL.startswith("https://github.com/julienXX/terminal-notifier/releases/download/"))
+        self.assertTrue(banner.VENDOR.startswith(ROOT + os.sep))
+        self.assertEqual({t["repo"] for t in banner.TOOLS.values()}, {"vjeantet/alerter", "julienXX/terminal-notifier"})
 
 
-@unittest.skipUnless(sys.platform == "darwin", "ditto / terminal-notifier are macOS only")
+@unittest.skipUnless(sys.platform == "darwin", "ditto is macOS only")
 class InstallTest(unittest.TestCase):
-    """The download path with a local zip standing in for the GitHub release."""
+    """The download path, with a local zip standing in for the GitHub release."""
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        app = os.path.join(self.tmp.name, "src", "terminal-notifier-2.0.0", "terminal-notifier.app", "Contents", "MacOS")
-        os.makedirs(app)
-        with open(os.path.join(app, "terminal-notifier"), "w") as f:
+        src = os.path.join(self.tmp.name, "src", "alerter_v1")
+        os.makedirs(src)
+        with open(os.path.join(src, "alerter"), "w") as f:
             f.write("#!/bin/sh\nexit 0\n")
-        os.chmod(os.path.join(app, "terminal-notifier"), 0o755)
-        self.zip = os.path.join(self.tmp.name, "tn.zip")
+        self.zip = os.path.join(self.tmp.name, "alerter.zip")
         subprocess.run(["ditto", "-c", "-k", os.path.join(self.tmp.name, "src"), self.zip], check=True)
-        vendor = os.path.join(self.tmp.name, "vendor")
-        self.saved = {k: getattr(live, k) for k in ("VENDOR", "TN_APP", "TN_BIN", "TN_STATE", "TN_URL", "TN_SHA256")}
-        live.VENDOR, live.TN_APP = vendor, os.path.join(vendor, "terminal-notifier.app")
-        live.TN_BIN = os.path.join(live.TN_APP, "Contents", "MacOS", "terminal-notifier")
-        live.TN_STATE, live.TN_URL = os.path.join(vendor, "install.json"), pathlib.Path(self.zip).as_uri()
-        self.env = os.environ.get("D2R_PROJECT")
-        os.environ["D2R_PROJECT"] = self.tmp.name
+        with open(self.zip, "rb") as f:
+            self.digest = hashlib.sha256(f.read()).hexdigest()
+        self.saved = (banner.VENDOR, banner.STATE)
+        banner.VENDOR = os.path.join(self.tmp.name, "vendor")
+        banner.STATE = os.path.join(banner.VENDOR, "install.json")
+        self.path = os.environ.get("PATH")
+        os.environ["PATH"] = "/usr/bin:/bin"  # a real alerter on PATH must not count
 
     def tearDown(self):
-        for k, v in self.saved.items():
-            setattr(live, k, v)
-        if self.env is None:
-            os.environ.pop("D2R_PROJECT", None)
-        else:
-            os.environ["D2R_PROJECT"] = self.env
+        banner.VENDOR, banner.STATE = self.saved
+        os.environ["PATH"] = self.path
         self.tmp.cleanup()
 
-    def test_installs_into_vendor_and_records_the_digest(self):
-        with open(self.zip, "rb") as f:
-            want = hashlib.sha256(f.read()).hexdigest()
-        live.TN_SHA256 = None
-        live.install_notifier()
-        st = live.read_install_state()
-        self.assertEqual((st["ok"], st["sha256"]), (True, want))
-        self.assertTrue(os.access(live.TN_BIN, os.X_OK))
-        self.assertFalse(os.path.exists(os.path.join(live.VENDOR, ".download")))
+    def release(self, digest):
+        return {"assets": [{"name": "alerter_v1_darwin_amd64.zip", "browser_download_url": "https://example/a.zip",
+                            "digest": digest}]}
+
+    def download(self, url, dest):
+        shutil.copy(self.zip, dest)
+
+    def test_installs_into_vendor_checked_against_githubs_digest(self):
+        st = banner.install_one("alerter", self.release("sha256:" + self.digest), self.download)
+        self.assertEqual((st["ok"], st["sha256"], st["checked"]), (True, self.digest, True), st)
+        self.assertEqual(banner.tool_path("alerter"), os.path.join(banner.VENDOR, "alerter"))
+        self.assertFalse(os.path.exists(os.path.join(banner.VENDOR, ".download-alerter")))
 
     def test_wrong_digest_installs_nothing(self):
-        live.TN_SHA256 = "0" * 64
-        live.install_notifier()
-        self.assertFalse(live.read_install_state()["ok"])
-        self.assertFalse(os.path.exists(live.TN_APP))
+        st = banner.install_one("alerter", self.release("sha256:" + "0" * 64), self.download)
+        self.assertFalse(st["ok"])
+        self.assertIn("校验对不上", st["err"])
+        self.assertIsNone(banner.tool_path("alerter"))
 
 
 class SessionStartTest(LiveBase):
@@ -374,7 +486,8 @@ class SessionStartTest(LiveBase):
 
     def test_the_convention_is_told_once_per_window_with_only_one_word_to_know(self):
         text = self.start()
-        self.assertIn("📌 记下了：当<什么情形>就<怎么做>。不要就说「撤」", text)
+        self.assertIn("📌 记下了：<规矩一句话>｜适用：<什么时候照做>。不要就说「撤」", text)
+        self.assertNotIn("不适用", text)
         self.assertIn("（所有项目）", text)
         for word in ("回 y", "／ p", "g 改", "promote", "合并"):
             self.assertNotIn(word, text)

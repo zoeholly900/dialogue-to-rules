@@ -171,6 +171,10 @@ def one_line(s):
 
 
 def render_rule(r):
+    if r.get("title"):  # 0.3.2 cards: 规矩｜适用 (a card that came in malformed keeps the whole line)
+        text = one_line(r.get("raw")) if r.get("raw") else "{} ｜适用 {}".format(
+            one_line(r["title"]), one_line(r.get("applies")) or "—")
+        return "- [{}] {} ｜证据「{}」｜范围 {}".format(r["id"], text, one_line(r["evidence"]["quote"]), r["scope"])
     what = []
     if r.get("action"):
         what.append("做 " + one_line(r["action"]))
@@ -266,6 +270,10 @@ scroll-margin-top:16px}
 .card:target,.card.hit{background:var(--hit)}
 .rule{font-size:21px;font-weight:600;margin:6px 0 10px}
 .quote{background:var(--quote);border-radius:8px;padding:8px 12px;margin:0 0 10px;font-size:16px}
+.lead{font-size:20px;margin:0 0 6px}
+dl{display:grid;grid-template-columns:4.5em 1fr;gap:6px 10px;margin:0 0 10px;font-size:16px}
+dt{color:var(--muted)}dd{margin:0}dd.quote{padding:4px 10px}
+.warn{color:#9a5b00;background:#fdecc8}
 .meta{color:var(--muted);font-size:14px}.how{font-size:15px;margin-top:8px}
 .tag{display:inline-block;font-size:13px;font-weight:600;border-radius:999px;padding:2px 10px;margin-right:6px}
 .on{color:var(--live);background:var(--live-bg)}.off{color:var(--gone);background:var(--gone-bg)}
@@ -292,11 +300,20 @@ def book_html():
             why = r.get("reason") or ""
             tag = f'<span class="tag off">已撤 {html.escape(r.get("deprecated_at") or "")}</span>'
             how = "已撤，不再生效" + (f"（{html.escape(why)}）" if why else "") + "。"
+        if r.get("format"):
+            tag += f'<span class="tag warn">{html.escape(r["format"])}</span>'
+        if r.get("title"):  # 0.3.2: 规矩 / 适用 / 证据原话
+            body = (f'<dl class="cols"><dt>规矩</dt><dd class="rule">{html.escape(brief(r))}</dd>'
+                    f'<dt>适用</dt><dd>{html.escape(r.get("applies") or "—")}</dd>'
+                    + (f'<dt>原话</dt><dd>{html.escape(r["raw"])}</dd>' if r.get("raw") else "")
+                    + f'<dt>证据原话</dt><dd class="quote">「{html.escape(one_line(r["evidence"].get("quote")))}」</dd></dl>')
+        else:  # older rules are shown as they were written
+            body = (f'<div class="rule">{html.escape(brief(r))}</div>'
+                    f'<div class="quote">证据：「{html.escape(one_line(r["evidence"].get("quote")))}」</div>')
         cards.append(
             f'<section class="card{"" if on else " gone"}" id="{anchor(r, p)}">'
             f'<div>{tag}<span class="meta">{html.escape(r["id"])} · {html.escape(where)}</span></div>'
-            f'<div class="rule">{html.escape(brief(r))}</div>'
-            f'<div class="quote">证据：「{html.escape(one_line(r["evidence"].get("quote")))}」</div>'
+            + body +
             f'<div class="meta">记下于 {html.escape(when)}'
             + (f' · <span title="{html.escape(p)}">{html.escape(p)}</span>' if p else "") + "</div>"
             f'<div class="how">{how}</div></section>')
@@ -306,7 +323,8 @@ def book_html():
 <title>规矩本</title><style>{BOOK_CSS}</style></head>
 <body><main>
 <h1>规矩本</h1>
-<p class="sub">dialogue-to-rules 替你记下的规矩，最新的在最上面。生效 {live} 条，已撤 {len(entries) - live} 条。更新于 {now().replace("T", " ")}</p>
+<p class="lead">AI 被你纠正一次就记下，下次照做；不要就撤。</p>
+<p class="sub">dialogue-to-rules（D2R）替你记下的规矩，最新的在最上面。生效 {live} 条，已撤 {len(entries) - live} 条。更新于 {now().replace("T", " ")}</p>
 <div class="bar"><label><input type="checkbox" id="hide"> 只看生效的</label></div>
 {empty}{"".join(cards)}
 </main>
@@ -349,7 +367,9 @@ def now():
 
 
 def brief(r):
-    """当X就Y, the one line the user reads."""
+    """The one line the user reads: the title of a 0.3.2 card, 当X就Y of an older one."""
+    if r.get("title"):
+        return one_line(r["title"])
     t, a, p = one_line(r.get("trigger")), one_line(r.get("action")), one_line(r.get("prohibit"))
     if a:
         return f"当{t}就{a}" + (f"，不要{p}" if p else "")
@@ -402,6 +422,9 @@ def add_rule(card, host, source="manual", session=None):
         "added_at": datetime.datetime.now().isoformat(timespec="milliseconds"),  # orders the rule book
         "source": source,
     }
+    for k in ("title", "applies", "raw", "format"):  # 0.3.2 cards
+        if one_line(card.get(k)):
+            rule[k] = one_line(card[k])
     snapshot(is_global)
     for r in rules:  # a newer rule that supersedes an old one retires it, never deletes it
         if r["id"] in supersedes and r["status"] == "active":
