@@ -1,8 +1,10 @@
 """D2R_MODE=live (default): the rule is written in the turn the user corrects, 撤 takes it back.
 Hooks run as subprocesses with fake payloads; no real model is called."""
+import hashlib
 import io
 import json
 import os
+import pathlib
 import subprocess
 import sys
 import tempfile
@@ -220,8 +222,19 @@ class RetractTest(LiveBase):
 class NotifyTest(LiveBase):
     def test_a_written_rule_shows_a_banner(self):
         self.turn(CORRECTION, REPLY)
-        self.assertEqual(self.notified(), [{"title": "记下一条规矩", "body": "当给用户文件路径就单独一行、后面不跟标点",
-                                            "subtitle": "不要就回「撤」"}])
+        b, = self.notified()
+        self.assertEqual({k: b[k] for k in ("title", "body", "subtitle")},
+                         {"title": "记下一条规矩", "body": "当给用户文件路径就单独一行、后面不跟标点", "subtitle": "不要就回「撤」"})
+
+    def test_clicking_opens_the_book_at_that_rule(self):
+        self.turn(CORRECTION, REPLY)
+        jump = self.notified()[0]["open"]
+        r, = self.active()
+        a = d2r.anchor(r, self.proj)
+        self.assertEqual(jump, os.path.join(self.home, ".d2r", "规矩本_跳转", a + ".html"))
+        self.assertIn("../规矩本.html#" + a, d2r.read_text(jump))
+        book = d2r.read_text(os.path.join(self.home, ".d2r", "规矩本.html"))
+        self.assertIn(f'id="{a}"', book)
 
     def test_all_projects_says_so_and_long_rules_are_cut(self):
         self.turn("以后所有窗都这样", "好\n📌 记下了（所有项目）：当派活，就先写清这活为谁做、解决谁的什么痛点、做完要达到什么目标，"
@@ -250,6 +263,102 @@ class NotifyTest(LiveBase):
         self.turn(CORRECTION, REPLY, env={"D2R_NOTIFY": "0"})
         self.assertEqual(self.notified(), [])
         self.assertEqual(len(self.active()), 1)
+
+
+class BookTest(LiveBase):
+    def test_book_has_every_rule_newest_first_with_what_to_say(self):
+        self.turn(CORRECTION, REPLY)
+        self.turn("以后所有窗派活都先写来头", "好\n📌 记下了（所有项目）：当派活就先写清为谁做。不要就说「撤」")
+        self.prompt("撤")
+        other = os.path.join(self.tmp.name, "other")
+        os.makedirs(other)
+        self.turn("又忘了，以后这个仓库提交前先跑测试", "好\n📌 记下了：当提交前就先跑测试。不要就说「撤」",
+                  session="s2", env={"D2R_PROJECT": other}, cwd=other)
+        book = d2r.read_text(os.path.join(self.home, ".d2r", "规矩本.html"))
+        order = [book.index(x) for x in ("当提交前就先跑测试", "当派活就先写清为谁做", "当给用户文件路径")]
+        self.assertEqual(order, sorted(order))  # newest on top, across projects
+        self.assertIn("证据：「" + CORRECTION + "」", book)
+        self.assertIn("已撤", book)
+        self.assertIn("所有项目", book)
+        self.assertIn("项目 proj", book)
+        self.assertIn("项目 other", book)
+        self.assertIn("在 proj 的窗里说「把 r001 撤了」", book)
+        self.assertIn("生效 2 条，已撤 1 条", book)
+
+    def test_text_is_escaped(self):
+        self.turn("以后别再这样", "好\n📌 记下了：当写 <script>alert(1)</script> 时就转义。不要就说「撤」")
+        book = d2r.read_text(os.path.join(self.home, ".d2r", "规矩本.html"))
+        self.assertNotIn("<script>alert", book)
+        self.assertIn("&lt;script&gt;", book)
+
+    def test_saying_guijuben_gets_the_path(self):
+        self.turn(CORRECTION, REPLY)
+        for ask in ("规矩本", "规矩本在哪", "打开规矩本"):
+            ctx = self.prompt(ask)
+            self.assertIn(os.path.join(self.home, ".d2r", "规矩本.html") + "\n" + os.path.join(self.home, ".d2r"), ctx)
+        self.assertIsNotNone(self.prompt("撤"))  # asking for the book did not use up the 撤
+        self.assertIsNone(self.prompt("帮我把规矩本这个词翻译成英文"))
+
+    def test_cli_deprecate_rebuilds_the_book(self):
+        self.turn(CORRECTION, REPLY)
+        subprocess.run([sys.executable, D2R, "deprecate", "r001"], capture_output=True, text=True, env=os.environ.copy())
+        self.assertIn("生效 0 条，已撤 1 条", d2r.read_text(os.path.join(self.home, ".d2r", "规矩本.html")))
+
+
+class NotifierTest(unittest.TestCase):
+    def test_fallback_says_how_to_see_everything(self):
+        self.assertEqual(live.BOOK_HINT, "\n看全部：说「规矩本」")
+
+    def test_install_never_reaches_outside_the_plugin(self):
+        for p in (live.VENDOR, live.TN_APP, live.TN_BIN, live.TN_STATE):
+            self.assertTrue(p.startswith(ROOT + os.sep))
+        self.assertTrue(live.TN_URL.startswith("https://github.com/julienXX/terminal-notifier/releases/download/"))
+
+
+@unittest.skipUnless(sys.platform == "darwin", "ditto / terminal-notifier are macOS only")
+class InstallTest(unittest.TestCase):
+    """The download path with a local zip standing in for the GitHub release."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        app = os.path.join(self.tmp.name, "src", "terminal-notifier-2.0.0", "terminal-notifier.app", "Contents", "MacOS")
+        os.makedirs(app)
+        with open(os.path.join(app, "terminal-notifier"), "w") as f:
+            f.write("#!/bin/sh\nexit 0\n")
+        os.chmod(os.path.join(app, "terminal-notifier"), 0o755)
+        self.zip = os.path.join(self.tmp.name, "tn.zip")
+        subprocess.run(["ditto", "-c", "-k", os.path.join(self.tmp.name, "src"), self.zip], check=True)
+        vendor = os.path.join(self.tmp.name, "vendor")
+        self.saved = {k: getattr(live, k) for k in ("VENDOR", "TN_APP", "TN_BIN", "TN_STATE", "TN_URL", "TN_SHA256")}
+        live.VENDOR, live.TN_APP = vendor, os.path.join(vendor, "terminal-notifier.app")
+        live.TN_BIN = os.path.join(live.TN_APP, "Contents", "MacOS", "terminal-notifier")
+        live.TN_STATE, live.TN_URL = os.path.join(vendor, "install.json"), pathlib.Path(self.zip).as_uri()
+        self.env = os.environ.get("D2R_PROJECT")
+        os.environ["D2R_PROJECT"] = self.tmp.name
+
+    def tearDown(self):
+        for k, v in self.saved.items():
+            setattr(live, k, v)
+        if self.env is None:
+            os.environ.pop("D2R_PROJECT", None)
+        else:
+            os.environ["D2R_PROJECT"] = self.env
+        self.tmp.cleanup()
+
+    def test_installs_into_vendor_and_records_the_digest(self):
+        with open(self.zip, "rb") as f:
+            want = hashlib.sha256(f.read()).hexdigest()
+        live.TN_SHA256 = None
+        live.install_notifier()
+        st = live.read_install_state()
+        self.assertEqual((st["ok"], st["sha256"]), (True, want))
+        self.assertTrue(os.access(live.TN_BIN, os.X_OK))
+        self.assertFalse(os.path.exists(os.path.join(live.VENDOR, ".download")))
+
+    def test_wrong_digest_installs_nothing(self):
+        live.TN_SHA256 = "0" * 64
+        live.install_notifier()
+        self.assertFalse(live.read_install_state()["ok"])
+        self.assertFalse(os.path.exists(live.TN_APP))
 
 
 class SessionStartTest(LiveBase):

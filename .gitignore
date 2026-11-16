@@ -1,3 +1,4 @@
 docs/自家试用/
 .d2r/
 __pycache__/
+vendor/

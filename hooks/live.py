@@ -20,10 +20,14 @@ written is reported to the user with a systemMessage, so "记下了" is never a 
 Every rule written or taken back also shows a system notification (macOS osascript, Linux notify-send,
 otherwise nothing): it never blocks, needs no click, and stays in the notification centre, so the user
 knows what was added even when the 📌 line scrolled past. D2R_NOTIFY=0 turns it off.
+Clicking a banner opens the rule book (scripts/d2r.py render_book) at that rule; that needs terminal-notifier,
+which is fetched once into <plugin>/vendor/ from its GitHub release when missing (until then: osascript,
+not clickable, ends with "看全部：说「规矩本」"). The user saying 规矩本 gets the page's path.
 Env: D2R_MODE, D2R_OFF=1, D2R_NOTIFY=0, D2R_PROJECT, D2R_HOME, D2R_HOST. Standard library only.
 """
 import json
 import os
+import pathlib
 import re
 import shutil
 import subprocess
@@ -40,10 +44,20 @@ MAX_PER_REPLY = 2          # a reply that "records" more than this is not follow
 QUOTE_WHOLE = 120          # a user message up to this long is the evidence as it is
 STATE_DAYS = 7             # sessions untouched this long are dropped from live_state.json
 NOTIFY_CHARS = 60          # a banner shows about two lines; the full rule is in CLAUDE.md
+BOOK_HINT = "\n看全部：说「规矩本」"   # where a banner cannot be clicked open
+VENDOR = os.path.join(ROOT, "vendor")
+TN_APP = os.path.join(VENDOR, "terminal-notifier.app")
+TN_BIN = os.path.join(TN_APP, "Contents", "MacOS", "terminal-notifier")
+TN_STATE = os.path.join(VENDOR, "install.json")
+TN_URL = "https://github.com/julienXX/terminal-notifier/releases/download/2.0.0/terminal-notifier-2.0.0.zip"
+TN_SHA256 = None           # not pinned yet (github.com was unreachable when this was written): the HTTPS
+                           # download from the official release is trusted and its digest kept in install.json
+TN_RETRY = 86400           # a failed download is tried again a day later, not on every banner
 
 MARK_RX = re.compile(r"^[ \t>*-]*📌\s*(?:\*\*)?记下了(?P<all>[（(]所有项目[）)])?(?:\*\*)?[：:]\s*(?P<body>.+?)\s*$", re.M)
 FENCE_RX = re.compile(r"```.*?(?:```|\Z)", re.S)
 TAIL_RX = re.compile(r"[。.；;，,\s]*(?:不要|不想要|不对)的?话?就?(?:说|回)\s*[「『“‘\"']?撤[」』”’\"']?.*$")
+BOOK_RX = re.compile(r"^\s*(?:看看?|打开|给我看看?|看下)?\s*(?:我的)?\s*规矩本\s*(?:呢|在哪|在哪儿|在哪里)?\s*[。.？?！!]*\s*$")
 TEMPLATE_RX = re.compile(r"<[^>]*(?:情形|怎么做|触发)[^>]*>|……")
 RETRACT_RX = re.compile(
     r"^\s*(?:撤|撤掉|撤了|撤回|撤吧|撤了吧|撤掉吧|撤销|这条撤了|这条撤掉|撤这条|撤掉这条|"
@@ -225,24 +239,99 @@ def last_assistant_text(transcript):
     return "\n".join(parts)
 
 
-def notify(title, body, subtitle=""):
-    """Fire and forget a banner. Never waits, never raises, never a dialog."""
+def notifier():
+    """terminal-notifier (its banners can open a page when clicked), from PATH or our own copy."""
+    found = shutil.which("terminal-notifier")
+    return found or (TN_BIN if os.access(TN_BIN, os.X_OK) else None)
+
+
+def read_install_state():
+    try:
+        with open(TN_STATE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def maybe_install_notifier():
+    """No terminal-notifier on a Mac: fetch one in the background, at most once a day. This banner falls back."""
+    st = read_install_state()
+    if st and time.time() - st.get("at", 0) < TN_RETRY:
+        return
+    try:
+        d2r.atomic_write(TN_STATE, json.dumps({"at": time.time(), "ok": False, "err": "正在装"}, ensure_ascii=False))
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "install-notifier"], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError as e:
+        log(f"terminal-notifier 没装成：{e}")
+
+
+def install_notifier():
+    """Download the official release into <plugin>/vendor/, check its hash, unpack, prove it runs.
+    Nothing outside the plugin's folder is touched (no brew, no /usr/local)."""
+    import hashlib
+    import urllib.request
+    tmp = os.path.join(VENDOR, ".download")
+    err, digest = "", None
+    try:
+        if os.path.isdir(tmp):
+            shutil.rmtree(tmp)
+        os.makedirs(tmp)
+        zpath = os.path.join(tmp, "tn.zip")
+        with urllib.request.urlopen(TN_URL, timeout=120) as resp, open(zpath, "wb") as f:
+            shutil.copyfileobj(resp, f)
+        with open(zpath, "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest()
+        if TN_SHA256 and digest != TN_SHA256:
+            raise ValueError(f"校验不对：{digest}")
+        subprocess.run(["ditto", "-x", "-k", zpath, tmp], check=True, timeout=60, capture_output=True)
+        app = next(os.path.join(dp, d) for dp, ds, _ in os.walk(tmp) for d in ds if d == "terminal-notifier.app")
+        if os.path.isdir(TN_APP):
+            shutil.rmtree(TN_APP)
+        shutil.move(app, TN_APP)
+        subprocess.run([TN_BIN, "-help"], timeout=20, capture_output=True)
+        if not os.access(TN_BIN, os.X_OK):
+            raise OSError("解开了但跑不起来")
+    except Exception as e:  # noqa: BLE001 - any failure means "fall back to osascript"
+        err = f"{type(e).__name__}: {e}"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    d2r.atomic_write(TN_STATE, json.dumps({"at": time.time(), "ok": not err, "err": err, "url": TN_URL,
+                                           "sha256": digest}, ensure_ascii=False))
+    log("terminal-notifier 装好了" if not err else f"terminal-notifier 没装成：{err}")
+
+
+def notify(title, body, subtitle="", rule=None):
+    """Fire and forget a banner. Never waits, never raises, never a dialog.
+    With a rule, clicking the banner opens the rule book at that rule (terminal-notifier only)."""
     if os.environ.get("D2R_NOTIFY") == "0":
         return
     body = body if len(body) <= NOTIFY_CHARS else body[:NOTIFY_CHARS - 1] + "…"
+    try:
+        target = d2r.jump_to(rule) if rule else d2r.book_path()
+    except (OSError, ValueError, KeyError) as e:
+        log(f"规矩本跳转页没写成：{e}")
+        target = None
     sink = os.environ.get("D2R_NOTIFY_LOG")  # tests: record instead of popping
     try:
         if sink:
             with open(sink, "a", encoding="utf-8") as f:
-                f.write(json.dumps({"title": title, "body": body, "subtitle": subtitle}, ensure_ascii=False) + "\n")
+                f.write(json.dumps({"title": title, "body": body, "subtitle": subtitle, "open": target},
+                                   ensure_ascii=False) + "\n")
             return
-        if sys.platform == "darwin" and shutil.which("osascript"):
+        tn = notifier() if sys.platform == "darwin" else None
+        if tn and target:
+            cmd = [tn, "-title", title, "-subtitle", subtitle, "-message", body, "-group", "d2r",
+                   "-open", pathlib.Path(target).as_uri()]
+        elif sys.platform == "darwin" and shutil.which("osascript"):
+            maybe_install_notifier()
             # text goes in as argv, so quotes in a rule cannot break the script
             cmd = ["osascript", "-e", "on run argv",
                    "-e", "display notification (item 1 of argv) with title (item 2 of argv) subtitle (item 3 of argv)",
-                   "-e", "end run", body, title, subtitle]
+                   "-e", "end run", body + BOOK_HINT, title, subtitle]
         elif shutil.which("notify-send"):
-            cmd = ["notify-send", "-a", "dialogue-to-rules", title, body + ("\n" + subtitle if subtitle else "")]
+            cmd = ["notify-send", "-a", "dialogue-to-rules", title,
+                   body + ("\n" + subtitle if subtitle else "") + BOOK_HINT]
         else:
             return
         subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -258,11 +347,17 @@ def on_prompt(payload):
     with Locked() as st:
         s = st.session(payload.get("session_id"))
         announced = s.pop("announced", [])
+        if BOOK_RX.match(prompt):
+            s["announced"] = announced  # asking for the book does not use up the 撤
+            path = d2r.render_book()
+            return ("用户要看规矩本（插件替他记下的所有规矩，网页）。直接把路径给他，文件一行、所在文件夹一行，"
+                    f"都从根目录写全、单独成行、后面不跟标点：\n{path}\n{os.path.dirname(path)}\n"
+                    "不用列规则内容，不用打开文件。")
         if RETRACT_RX.match(prompt) and announced:
             r = d2r.retract(host(), among=announced)
             if r is not None:
                 log(f"撤 {r['id']}")
-                notify("已撤", "已撤：" + d2r.brief(r))
+                notify("已撤", "已撤：" + d2r.brief(r), rule=r)
                 return ("用户刚说撤：插件已经把刚记的这条作废了（不删）——"
                         f"[{r['id']}] {d2r.brief(r)}。回一句告诉用户撤掉了这条就行，别再记它。"
                         f"要是用户其实不是在撤规则，跑 python3 \"{SCRIPT}\" undo 恢复。")
@@ -300,7 +395,7 @@ def on_stop(payload):
                 written.append(r["id"])
                 existing[d2r.brief(r)] = r["id"]
                 log(f"记下 {r['id']}（{r['scope']}）：{d2r.brief(r)}")
-                notify("记下一条规矩" + ("（所有项目）" if r["scope"] == "global" else ""), body, "不要就回「撤」")
+                notify("记下一条规矩" + ("（所有项目）" if r["scope"] == "global" else ""), body, "不要就回「撤」", rule=r)
             except (SystemExit, Exception) as e:  # announced but not stored: the user must hear it
                 failed.append(f"{body}（{e}）")
                 log(f"没记上：{body}：{e}")
@@ -341,6 +436,9 @@ def start_context(source, session):
 
 
 def main():
+    if sys.argv[1:] == ["install-notifier"]:
+        install_notifier()
+        return
     try:
         payload = json.load(sys.stdin)
     except ValueError:
