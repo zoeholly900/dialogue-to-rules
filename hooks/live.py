@@ -17,11 +17,16 @@ The user only ever needs one word: 撤. Undo, deprecate <id>, list stay in scrip
 State: <project>/.d2r/live_state.json (per session: last prompt, rules the last reply announced).
 Failures never interrupt: one line to <project>/.d2r/live.log; a rule that was announced but could not be
 written is reported to the user with a systemMessage, so "记下了" is never a lie.
-Env: D2R_MODE, D2R_OFF=1, D2R_PROJECT, D2R_HOME, D2R_HOST. Standard library only.
+Every rule written or taken back also shows a system notification (macOS osascript, Linux notify-send,
+otherwise nothing): it never blocks, needs no click, and stays in the notification centre, so the user
+knows what was added even when the 📌 line scrolled past. D2R_NOTIFY=0 turns it off.
+Env: D2R_MODE, D2R_OFF=1, D2R_NOTIFY=0, D2R_PROJECT, D2R_HOME, D2R_HOST. Standard library only.
 """
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import time
 
@@ -34,6 +39,7 @@ TASK_RULES_SHOWN = 20
 MAX_PER_REPLY = 2          # a reply that "records" more than this is not following the convention
 QUOTE_WHOLE = 120          # a user message up to this long is the evidence as it is
 STATE_DAYS = 7             # sessions untouched this long are dropped from live_state.json
+NOTIFY_CHARS = 60          # a banner shows about two lines; the full rule is in CLAUDE.md
 
 MARK_RX = re.compile(r"^[ \t>*-]*📌\s*(?:\*\*)?记下了(?P<all>[（(]所有项目[）)])?(?:\*\*)?[：:]\s*(?P<body>.+?)\s*$", re.M)
 FENCE_RX = re.compile(r"```.*?(?:```|\Z)", re.S)
@@ -219,6 +225,32 @@ def last_assistant_text(transcript):
     return "\n".join(parts)
 
 
+def notify(title, body, subtitle=""):
+    """Fire and forget a banner. Never waits, never raises, never a dialog."""
+    if os.environ.get("D2R_NOTIFY") == "0":
+        return
+    body = body if len(body) <= NOTIFY_CHARS else body[:NOTIFY_CHARS - 1] + "…"
+    sink = os.environ.get("D2R_NOTIFY_LOG")  # tests: record instead of popping
+    try:
+        if sink:
+            with open(sink, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"title": title, "body": body, "subtitle": subtitle}, ensure_ascii=False) + "\n")
+            return
+        if sys.platform == "darwin" and shutil.which("osascript"):
+            # text goes in as argv, so quotes in a rule cannot break the script
+            cmd = ["osascript", "-e", "on run argv",
+                   "-e", "display notification (item 1 of argv) with title (item 2 of argv) subtitle (item 3 of argv)",
+                   "-e", "end run", body, title, subtitle]
+        elif shutil.which("notify-send"):
+            cmd = ["notify-send", "-a", "dialogue-to-rules", title, body + ("\n" + subtitle if subtitle else "")]
+        else:
+            return
+        subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except OSError as e:
+        log(f"通知没发出：{e}")
+
+
 # ---------- events ----------
 
 def on_prompt(payload):
@@ -230,6 +262,7 @@ def on_prompt(payload):
             r = d2r.retract(host(), among=announced)
             if r is not None:
                 log(f"撤 {r['id']}")
+                notify("已撤", "已撤：" + d2r.brief(r))
                 return ("用户刚说撤：插件已经把刚记的这条作废了（不删）——"
                         f"[{r['id']}] {d2r.brief(r)}。回一句告诉用户撤掉了这条就行，别再记它。"
                         f"要是用户其实不是在撤规则，跑 python3 \"{SCRIPT}\" undo 恢复。")
@@ -267,6 +300,7 @@ def on_stop(payload):
                 written.append(r["id"])
                 existing[d2r.brief(r)] = r["id"]
                 log(f"记下 {r['id']}（{r['scope']}）：{d2r.brief(r)}")
+                notify("记下一条规矩" + ("（所有项目）" if r["scope"] == "global" else ""), body, "不要就回「撤」")
             except (SystemExit, Exception) as e:  # announced but not stored: the user must hear it
                 failed.append(f"{body}（{e}）")
                 log(f"没记上：{body}：{e}")

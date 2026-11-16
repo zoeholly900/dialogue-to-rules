@@ -31,11 +31,13 @@ class LiveBase(unittest.TestCase):
         self.home = os.path.join(self.tmp.name, "home")
         os.makedirs(self.proj)
         os.makedirs(self.home)
-        keys = ("D2R_PROJECT", "D2R_HOME", "D2R_HOST", "D2R_MODE", "D2R_OFF", "D2R_SWEEP_CHILD", "CLAUDE_PROJECT_DIR")
+        keys = ("D2R_PROJECT", "D2R_HOME", "D2R_HOST", "D2R_MODE", "D2R_OFF", "D2R_SWEEP_CHILD", "CLAUDE_PROJECT_DIR",
+                "D2R_NOTIFY", "D2R_NOTIFY_LOG")
         self.env = {k: os.environ.get(k) for k in keys}
         for k in keys:
             os.environ.pop(k, None)
-        os.environ.update(D2R_PROJECT=self.proj, D2R_HOME=self.home, D2R_HOST="claude")
+        self.banners = os.path.join(self.tmp.name, "banners.jsonl")  # no real banner pops during tests
+        os.environ.update(D2R_PROJECT=self.proj, D2R_HOME=self.home, D2R_HOST="claude", D2R_NOTIFY_LOG=self.banners)
 
     def tearDown(self):
         for k, v in self.env.items():
@@ -72,6 +74,12 @@ class LiveBase(unittest.TestCase):
     def turn(self, user, reply, **kw):
         self.prompt(user, **kw)
         return self.stop(reply, **kw)
+
+    def notified(self):
+        if not os.path.exists(self.banners):
+            return []
+        with open(self.banners, encoding="utf-8") as f:
+            return [json.loads(line) for line in f]
 
 
 class ParseTest(unittest.TestCase):
@@ -207,6 +215,41 @@ class RetractTest(LiveBase):
         subprocess.run([sys.executable, D2R, "retract"], capture_output=True, text=True, env=os.environ.copy())
         out = subprocess.run([sys.executable, D2R, "retract"], capture_output=True, text=True, env=os.environ.copy())
         self.assertNotEqual(out.returncode, 0)
+
+
+class NotifyTest(LiveBase):
+    def test_a_written_rule_shows_a_banner(self):
+        self.turn(CORRECTION, REPLY)
+        self.assertEqual(self.notified(), [{"title": "记下一条规矩", "body": "当给用户文件路径就单独一行、后面不跟标点",
+                                            "subtitle": "不要就回「撤」"}])
+
+    def test_all_projects_says_so_and_long_rules_are_cut(self):
+        self.turn("以后所有窗都这样", "好\n📌 记下了（所有项目）：当派活，就先写清这活为谁做、解决谁的什么痛点、做完要达到什么目标，"
+                  "窗名写清在干什么、谁要的、哪天派的，做完回报时单列一段自己默认了什么、哪里没实测。不要就说「撤」")
+        b, = self.notified()
+        self.assertEqual(b["title"], "记下一条规矩（所有项目）")
+        self.assertEqual(len(b["body"]), live.NOTIFY_CHARS)
+        self.assertTrue(b["body"].endswith("…"))
+
+    def test_che_shows_a_banner_too(self):
+        self.turn(CORRECTION, REPLY)
+        self.prompt("撤")
+        b = self.notified()[-1]
+        self.assertEqual((b["title"], b["subtitle"]), ("已撤", ""))
+        self.assertTrue(b["body"].startswith("已撤：当给用户文件路径"))
+
+    def test_nothing_written_nothing_shown(self):
+        self.turn("帮我看一眼", "看了，没问题")
+        self.turn(CORRECTION, REPLY)
+        self.turn(CORRECTION, REPLY)  # already a rule: written once, shown once
+        self.prompt("撤")
+        self.prompt("撤")  # nothing left to take back
+        self.assertEqual([b["title"] for b in self.notified()], ["记下一条规矩", "已撤"])
+
+    def test_notify_off(self):
+        self.turn(CORRECTION, REPLY, env={"D2R_NOTIFY": "0"})
+        self.assertEqual(self.notified(), [])
+        self.assertEqual(len(self.active()), 1)
 
 
 class SessionStartTest(LiveBase):
