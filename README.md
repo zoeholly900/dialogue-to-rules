@@ -38,7 +38,7 @@ claude plugin install dialogue-to-rules --scope project
 - **撤**：刚记的那条作废（不删，能恢复）。也可以说「不要这条」「别记」。
 - **漏了**：打 `/dialogue-to-rules:d2r 你刚才…`，它就记。
 - **规矩本**：说「规矩本」拿到路径，或者直接打开 `~/.d2r/规矩本.html`。
-- **不想用了**：设环境变量 `D2R_OFF=1`。只关通知：`D2R_NOTIFY=0`。
+- **不想用了**：设环境变量 `D2R_OFF=1`。只关通知：`D2R_NOTIFY=0`。按钮通知默认等 30 秒，`D2R_NOTIFY_TIMEOUT=<秒>` 可改。
 - 规则写在哪：本项目的进 `./CLAUDE.md`，它判断「所有项目都成立」的（那一行会写「记下了（所有项目）」）进 `~/.claude/CLAUDE.md`。都在 `<!-- d2r:begin -->` 到 `<!-- d2r:end -->` 之间，块外一个字不碰。
 
 ---

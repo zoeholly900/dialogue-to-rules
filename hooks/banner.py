@@ -17,7 +17,7 @@ publishes for the asset. A failed fetch is tried again a day later; until then t
 CLI (used by the plugin itself):
   banner.py install        fetch whatever is missing into vendor/
   banner.py wait <json>    show one alerter banner and act on the click
-Env: D2R_NOTIFY=0 off. D2R_NOTIFY_LOG=<file> (tests): record banners and page opens there instead.
+Env: D2R_NOTIFY=0 off. D2R_NOTIFY_TIMEOUT=<seconds> how long the button banner waits (default 30). D2R_NOTIFY_LOG=<file> (tests): record banners and page opens there instead.
 Standard library only.
 """
 import json
@@ -36,7 +36,7 @@ NOTIFY_CHARS = 60          # a banner shows about two lines; the full rule is in
 TITLE_CHARS = 24           # the title row is one line; a 0.3.2 title is ≤16, an old 当X就Y gets cut
 TITLE_PLUS, TITLE_MINUS = "规矩+1：", "规矩-1："   # who is talking and what happened, before anything else
 BOOK_HINT = "\n看全部：说「规矩本」"   # where a banner cannot be clicked open
-TIMEOUT = 30               # seconds an alerter banner waits for a click
+TIMEOUT = 30               # seconds an alerter banner waits for a click (D2R_NOTIFY_TIMEOUT overrides)
 BUTTONS = ("撤", "看看")
 CLOSE_LABEL = "好的"
 VENDOR = os.path.join(ROOT, "vendor")
@@ -273,20 +273,33 @@ def body_for(body, via):
         via, "不要就回「撤」" + BOOK_HINT)
 
 
-def alerter_args(exe, spec):
-    """alerter has used both -actions and --actions over its versions: ask it which."""
+def timeout():
     try:
-        helptext = subprocess.run([exe, "-help"], capture_output=True, text=True, timeout=10)
-        helptext = helptext.stdout + helptext.stderr
-    except (OSError, subprocess.TimeoutExpired):
-        helptext = ""
+        return max(5, int(os.environ.get("D2R_NOTIFY_TIMEOUT") or TIMEOUT))
+    except ValueError:
+        return TIMEOUT
+
+
+def alerter_args(exe, spec):
+    """alerter changed its flags over the years (-actions / -closeLabel, then --actions / --close-label):
+    ask it which."""
+    helptext = ""
+    for ask in ("--help", "-help"):
+        try:
+            out = subprocess.run([exe, ask], capture_output=True, text=True, timeout=10)
+            helptext = out.stdout + out.stderr
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if "actions" in helptext:
+            break
     d = "--" if "--actions" in helptext else "-"
+    close = "--close-label" if "--close-label" in helptext else d + "closeLabel"
     args = [exe, d + "title", spec["title"], d + "message", spec["body"], d + "group", "d2r",
-            d + "timeout", str(TIMEOUT)]
+            d + "timeout", str(timeout())]
     if spec["subtitle"]:
         args += [d + "subtitle", spec["subtitle"]]
     if spec["buttons"]:
-        args += [d + "actions", ",".join(BUTTONS), d + "closeLabel", CLOSE_LABEL]
+        args += [d + "actions", ",".join(BUTTONS), close, CLOSE_LABEL]
     return args
 
 
@@ -322,7 +335,9 @@ def wait(spec):
     if not exe:
         return
     try:
-        out = subprocess.run(alerter_args(exe, spec), capture_output=True, text=True, timeout=TIMEOUT + 60)
+        out = subprocess.run(alerter_args(exe, spec), capture_output=True, text=True, timeout=timeout() + 60)
+        if out.returncode != 0:
+            log(f"alerter 退出码 {out.returncode}：{(out.stderr or out.stdout).strip()[:200]}")
         answer = out.stdout.strip().splitlines()[-1] if out.stdout.strip() else ""
         if answer.startswith("{"):  # --json output
             answer = json.loads(answer).get("activationValue") or json.loads(answer).get("activationType") or ""

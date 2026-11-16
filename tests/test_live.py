@@ -348,7 +348,8 @@ class ButtonTest(LiveBase):
         self.assertEqual(len(self.notified()), 1)
 
     def test_alerter_args_follow_its_own_help(self):
-        for helptext, d in (("-actions VALUE", "-"), ("--actions VALUE", "--")):
+        for helptext, d, close in (("-actions VALUE -closeLabel VALUE", "-", "-closeLabel"),
+                                   ("--actions <actions> --close-label <close-label>", "--", "--close-label")):
             exe = os.path.join(self.tmp.name, "alerter")
             with open(exe, "w") as f:
                 f.write(f"#!/bin/sh\necho '{helptext}'\n")
@@ -356,7 +357,7 @@ class ButtonTest(LiveBase):
             args = banner.alerter_args(exe, self.spec() if d == "-" else self.notified()[0])
             self.assertIn(d + "actions", args)
             self.assertEqual(args[args.index(d + "actions") + 1], "撤,看看")
-            self.assertEqual(args[args.index(d + "closeLabel") + 1], "好的")
+            self.assertEqual(args[args.index(close) + 1], "好的")
             self.assertEqual(args[args.index(d + "title") + 1], "规矩+1：" + RULE)
             self.assertEqual(args[args.index(d + "subtitle") + 1], "适用：" + WHERE)
 
