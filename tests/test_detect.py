@@ -40,7 +40,7 @@ class DetectTest(unittest.TestCase):
         r = self.run_hook("别再给我加 emoji 了", {"D2R_MODE": "nudge"})
         out = json.loads(r.stdout)["hookSpecificOutput"]
         self.assertEqual(out["hookEventName"], "UserPromptSubmit")
-        self.assertIn("【规则卡", out["additionalContext"])
+        self.assertIn("📌 记下了", out["additionalContext"])
         self.assertNotIn("description:", out["additionalContext"])  # frontmatter stripped
         self.assertNotIn("$", out["additionalContext"])  # placeholders filled in
 
@@ -53,14 +53,14 @@ class DetectTest(unittest.TestCase):
         out = json.loads(self.run_hook("帮我看一眼这个文件", {"D2R_MODE": "nudge"}).stdout)["hookSpecificOutput"]
         ctx = out["additionalContext"]
         self.assertEqual(ctx, detect.NUDGE.format(root=ROOT))
-        self.assertNotIn("四条规矩", ctx)  # the reminder carries the card skeleton, not the whole spec
+        self.assertNotIn("回 y", ctx)  # one word to know: 撤
         self.assertTrue(os.path.isfile(os.path.join(ROOT, "commands", "d2r.md")))
         self.assertLessEqual(len(detect.NUDGE.replace("{root}", "")), 400)
 
     def test_nudge_mode_still_injects_full_card_on_regex_hit(self):
         ctx = json.loads(self.run_hook("别再给我加 emoji 了", {"D2R_MODE": "nudge"})
                          .stdout)["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("【规则卡", ctx)
+        self.assertIn("📌 记下了", ctx)
 
     def test_bad_stdin_is_silent(self):
         r = subprocess.run([sys.executable, os.path.join(ROOT, "hooks", "detect.py")],

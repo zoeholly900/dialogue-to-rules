@@ -44,12 +44,12 @@ class NudgeModeTest(unittest.TestCase):
         os.environ.update(self.env)
 
     def test_every_fish_line_gets_card_or_nudge(self):
-        os.environ["D2R_MODE"] = "nudge"  # the default is now sweep, which injects nothing
+        os.environ["D2R_MODE"] = "nudge"  # the default is now live, which injects nothing
         for x in cases() + cases(HELD_OUT):
             ctx = detect.context(x["text"])
             self.assertIsNotNone(ctx, x["text"])
             if detect.match(x["text"]):
-                self.assertIn("【规则卡", ctx)
+                self.assertIn("📌 记下了", ctx)
             else:
                 self.assertEqual(ctx, detect.NUDGE.format(root=detect.ROOT))
 

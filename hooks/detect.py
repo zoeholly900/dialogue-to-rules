@@ -3,10 +3,11 @@
 
 Reads the hook JSON from stdin and prints
 {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ...}}
-D2R_MODE=sweep (default): print nothing. The conversation is swept once at the end instead
-(hooks/sweep.py on SessionEnd / PreCompact, candidates shown on SessionStart).
+D2R_MODE=live (default) or sweep: print nothing here. The model learns the one-line convention once per
+window from hooks/live.py, which also writes the rule and handles 撤.
 D2R_MODE=nudge: a regex hit injects all of commands/d2r.md; every other message gets
-NUDGE, a one-line reminder that leaves the "is this a correction?" call to the model.
+NUDGE, a short reminder that leaves the "is this a correction?" call to the model.
+Either way the model answers with the same 📌 line live.py writes; there is no y/n any more.
 D2R_MODE=regex: a regex hit injects d2r.md, a miss prints nothing. D2R_OFF=1 turns it all off.
 Regexes alone missed most real corrections (they only knew the phrasings we tuned them on).
 A miss is worse than a nag, but nagging has a ceiling: one narrow pattern fires alone;
@@ -52,17 +53,15 @@ WEAK_COMPILED = [(name, re.compile(p, re.I)) for name, p in WEAK]
 WEAK_NEEDED = 2
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-NUDGE = ("先判断用户这句是不是在纠正你、否定你刚做的或给出它要的正解。不是就当没看见，别提这句。"
-         "是的话再判断值不值得记：只有通用的、以后会反复碰到、有底层指导意义的工作习惯才出卡；"
-         "只在这一单成立的细节、改稿方向、闲聊里的澄清，直接照改，不出卡。"
-         "值得记就在回复开头出整张卡，七行一行不少，然后接着干活：\n"
-         "【规则卡·还没写入】\n证据：「用户原话，一字不改」\n我刚才：一句\n以后：当 …→ 做 … / 不做 …\n"
-         "范围：task（默认，用户没说'以后都'就不升）\n测试：给我 … 时，我应该 …\n"
-         "回 y 才写入 ／ n 丢弃 ／ p 改 project ／ g 改 global\n"
-         "用户回 y/p/g 后再读插件根 {root} 的 commands/d2r.md，按它用 scripts/d2r.py add 写入；n 什么都不写。")
+NUDGE = ("先判断用户这句是不是在纠正你、而且他自己说明了这是规矩（「以后」「每次」「别再」「又」「说过」这类）。"
+         "不是就当没看见，别提这句。对这一次成品的修改意见、闲聊里的澄清，照改，不记。"
+         "是、而且换个任务还会碰到，就照常回复，在回复最后单独一行写：\n"
+         "📌 记下了：当<什么情形>就<怎么做>。不要就说「撤」\n"
+         "（不分项目都成立的写成「记下了（所有项目）」）。插件会自动存，不用跑命令，不要问用户要不要记。"
+         "细则在插件根 {root} 的 commands/d2r.md。")
 
-FALLBACK = ("用户可能在纠正你。先出一张【规则卡】（证据=用户原话、范围默认 task），"
-            "问 y/n，再接着干活；y 之后用 d2r.py add 写入。")
+FALLBACK = ("用户可能在纠正你。是而且值得记，就在回复最后单独一行写："
+            "📌 记下了：当<什么情形>就<怎么做>。不要就说「撤」——插件会自动存。")
 
 
 def match(text):
@@ -91,8 +90,8 @@ def instructions(root=ROOT):
 
 def context(prompt):
     """What to inject for this prompt under the current D2R_* settings, or None."""
-    mode = os.environ.get("D2R_MODE") or "sweep"
-    if os.environ.get("D2R_OFF") == "1" or mode == "sweep":
+    mode = os.environ.get("D2R_MODE") or "live"
+    if os.environ.get("D2R_OFF") == "1" or mode in ("live", "sweep"):
         return None
     if match(prompt):
         return instructions()

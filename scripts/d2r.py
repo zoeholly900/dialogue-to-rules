@@ -11,13 +11,19 @@ Usage:
   d2r.py candidates
   d2r.py promote <c001> [--scope task|project|global]
   d2r.py drop <c001>
+  d2r.py retract                              the user said 撤: deprecate the latest rule written here
+  d2r.py migrate                              turn every queued candidate into a rule (default-on)
 
 Storage (source of truth):
   task / project rules -> <project>/.d2r/rules.jsonl   ids r001, r002, ...
   global rules         -> ~/.d2r/rules.jsonl           ids g001, g002, ...
-Candidates (filled by hooks/sweep.py, answered by promote / drop):
+Candidates (the old y/n queue; since 0.3 nothing waits there, `migrate` turns it into rules):
   <project>/.d2r/候选.jsonl      ids c001, c002, ...
   <project>/.d2r/候选_已丢.jsonl  quotes the user said n to, so they are not proposed again
+Default-on bookkeeping (0.3):
+  <project>/.d2r/最近写入.jsonl   ids written from this project, newest last; `retract` walks it backwards
+  <project>/.d2r/待告知.jsonl     rules that went live without the user seeing them (sweep, migrate);
+                                 hooks/live.py tells the user in one line next window
 Rendering: active project rules go into a managed block in <project>/CLAUDE.md
 (Codex: AGENTS.md); active global rules into ~/.claude/CLAUDE.md (Codex:
 ~/.codex/AGENTS.md). Task rules and deprecated rules are never rendered.
@@ -63,6 +69,14 @@ def dropped_path():
     return os.path.join(project_dir(), ".d2r", "候选_已丢.jsonl")
 
 
+def recent_path():
+    return os.path.join(project_dir(), ".d2r", "最近写入.jsonl")
+
+
+def notices_path():
+    return os.path.join(project_dir(), ".d2r", "待告知.jsonl")
+
+
 def last_op_path():
     return os.path.join(project_dir(), ".d2r", "last_op.json")
 
@@ -101,9 +115,19 @@ def save(is_global, rules):
                  "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rules))
 
 
-def load_cands():
-    text = read_text(cand_path()) or ""
+def load_jsonl(path):
+    text = read_text(path) or ""
     return [json.loads(ln) for ln in text.splitlines() if ln.strip()]
+
+
+def append_jsonl(path, items):
+    if items:
+        atomic_write(path, (read_text(path) or "")
+                     + "".join(json.dumps(x, ensure_ascii=False) + "\n" for x in items))
+
+
+def load_cands():
+    return load_jsonl(cand_path())
 
 
 def save_cands(cands):
@@ -175,6 +199,18 @@ def today():
     return datetime.date.today().isoformat()
 
 
+def now():
+    return datetime.datetime.now().isoformat(timespec="seconds")
+
+
+def brief(r):
+    """当X就Y, the one line the user reads."""
+    t, a, p = one_line(r.get("trigger")), one_line(r.get("action")), one_line(r.get("prohibit"))
+    if a:
+        return f"当{t}就{a}" + (f"，不要{p}" if p else "")
+    return f"当{t}不要{p}"
+
+
 def norm_id(s):
     """r2 / R002 / r002 -> r002 (same for g)."""
     m = re.fullmatch(r"\s*([rRgG])0*(\d+)\s*", s)
@@ -188,7 +224,7 @@ def next_id(rules, prefix):
     return f"{prefix}{(max(nums) if nums else 0) + 1:03d}"
 
 
-def add_rule(card, host):
+def add_rule(card, host, source="manual", session=None):
     """Validate a card, write it to the store and re-render. Returns the new rule."""
     scope = card.get("scope") or "task"
     if scope not in SCOPES:
@@ -218,6 +254,8 @@ def add_rule(card, host):
         "deprecated_at": None,
         "reason": "",
         "version": 1,
+        "added_at": now(),
+        "source": source,
     }
     snapshot(is_global)
     for r in rules:  # a newer rule that supersedes an old one retires it, never deletes it
@@ -225,8 +263,69 @@ def add_rule(card, host):
             r.update(status="deprecated", deprecated_at=today(), reason=f"superseded by {rule['id']}")
     rules.append(rule)
     save(is_global, rules)
+    append_jsonl(recent_path(), [{"id": rule["id"], "at": rule["added_at"], "session": session}])
     render(host)
     return rule
+
+
+def apply_auto(cards, host, source, session=None):
+    """Default-on: write each card as a rule with no question asked, and queue a one-line notice so the
+    user hears about it next window. task is not a default any more: it falls to project."""
+    added = []
+    for card in cards:
+        card = dict(card)
+        if card.get("scope") not in ("project", "global"):
+            card["scope"] = "project"
+        added.append(add_rule(card, host, source=source, session=session))
+    append_jsonl(notices_path(), [{"id": r["id"], "brief": brief(r), "scope": r["scope"]} for r in added])
+    return added
+
+
+def migrate_cands(host):
+    """Everything still waiting for a y/n in the old queue goes live (the user was never going to answer)."""
+    cands = load_cands()
+    if not cands:
+        return []
+    cards = []
+    for c in cands:
+        card = {k: c.get(k) for k in ("trigger", "action", "prohibit", "scope", "evidence")}
+        card["evidence"] = dict(c["evidence"], date=c.get("date") or today())
+        cards.append(card)
+    added = apply_auto(cards, host, source="candidate")
+    save_cands([])
+    return added
+
+
+def take_notices():
+    """The notices not yet shown, still-active rules only; the file is cleared."""
+    path = notices_path()
+    items = load_jsonl(path)
+    if os.path.exists(path):
+        os.remove(path)
+    alive = {r["id"] for g in (False, True) for r in load(g) if r["status"] == "active"}
+    return [n for n in items if n.get("id") in alive]
+
+
+def find_rule(rid):
+    is_global = rid.startswith("g")
+    rules = load(is_global)
+    return is_global, rules, next((r for r in rules if r["id"] == rid), None)
+
+
+def retract(host, among=None, reason="用户说撤"):
+    """Deprecate the newest still-active rule written from this project (or the newest of `among`).
+    Never deletes; `undo` brings it back. -> the rule, or None when there is nothing to take back."""
+    ids = list(among) if among is not None else [e["id"] for e in load_jsonl(recent_path())]
+    for rid in reversed(ids):
+        is_global, rules, r = find_rule(rid)
+        if r is None or r["status"] != "active":
+            continue
+        snapshot(is_global)
+        r.update(status="deprecated", deprecated_at=today(), reason=reason)
+        save(is_global, rules)
+        render(host)
+        return r
+    return None
 
 
 def print_added(rule):
@@ -274,7 +373,7 @@ def cmd_promote(args):
     card["evidence"] = dict(cand["evidence"], date=cand.get("date") or today())
     if args.scope:
         card["scope"] = args.scope
-    print_added(add_rule(card, args.host))
+    print_added(add_rule(card, args.host, source="candidate"))
     save_cands(rest)
 
 
@@ -287,6 +386,21 @@ def cmd_drop(args):
     atomic_write(path, old + json.dumps({"quote": cand["evidence"]["quote"], "date": today()},
                                         ensure_ascii=False) + "\n")
     print(f"{cand['id']} 已丢弃，没写任何规则")
+
+
+def cmd_retract(args):
+    r = retract(args.host)
+    if r is None:
+        raise SystemExit("这个项目里没有可以撤的规则")
+    print(f"已撤 {r['id']}：{brief(r)}（不删，undo 能恢复）")
+
+
+def cmd_migrate(args):
+    added = migrate_cands(args.host)
+    for r in added:
+        print(f"{r['id']} 已生效（范围 {r['scope']}）：{brief(r)}")
+    if not added:
+        print("候选池是空的，没动")
 
 
 def cmd_deprecate(args):
@@ -371,10 +485,13 @@ def main(argv=None):
     pr.add_argument("--scope", choices=SCOPES, help="不给就用候选卡上的范围；回 p 给 project，回 g 给 global")
     dr = sub.add_parser("drop")
     dr.add_argument("id")
+    sub.add_parser("retract")
+    sub.add_parser("migrate")
     args = p.parse_args(argv)
     {"add": cmd_add, "deprecate": cmd_deprecate, "list": cmd_list,
      "undo": cmd_undo, "render": cmd_render, "candidates": cmd_candidates,
-     "promote": cmd_promote, "drop": cmd_drop}[args.cmd](args)
+     "promote": cmd_promote, "drop": cmd_drop, "retract": cmd_retract,
+     "migrate": cmd_migrate}[args.cmd](args)
 
 
 if __name__ == "__main__":
