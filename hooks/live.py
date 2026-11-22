@@ -47,24 +47,28 @@ TAIL_RX = re.compile(r"[。.；;，,\s]*(?:不要|不想要|不对)的?话?就?(
 BOOK_RX = re.compile(r"^\s*(?:看看?|打开|给我看看?|看下)?\s*(?:我的)?\s*规矩本\s*(?:呢|在哪|在哪儿|在哪里)?\s*[。.？?！!]*\s*$")
 TEMPLATE_RX = re.compile(r"<[^>]*(?:情形|怎么做|触发|标题|照做|不用管|字)[^>]*>|……")
 SEG_RX = re.compile(r"^(?P<title>[^｜|]+?)\s*[｜|]\s*适用\s*[：:]\s*(?P<applies>[^｜|]+?)\s*$")
+SEG3_RX = re.compile(r"^(?P<title>[^｜|]+?)\s*[｜|]\s*适用\s*[：:]\s*(?P<applies>[^｜|]+?)\s*[｜|]\s*为什么\s*[：:]\s*(?P<why>[^｜|]+?)\s*$")  # 1121：每条要写原因
 TITLE_MAX = 16             # the rule itself: the banner's first line
 SCOPE_MAX = 20             # 适用
+WHY_MAX = 30               # 为什么：这条防什么问题、为谁服务（鱼 1121：每一个原则都要有其设定的原因和适用场景）
 RETRACT_RX = re.compile(
     r"^\s*(?:撤|撤掉|撤了|撤回|撤吧|撤了吧|撤掉吧|撤销|这条撤了|这条撤掉|撤这条|撤掉这条|"
     r"不要这条|不要这条了|这条不要|这条不要了|这条别记|别记这条|别记|别记了|不用记|不用记了|不要记)"
     r"\s*[。.！!～~]*\s*$")
 
 LIVE_RULES = """dialogue-to-rules 开着：用户纠正你时，你当场记下，不问他要不要记。
-- 什么时候记：两条都要满足。①用户自己说明了这是一条规矩：话里有「以后」「每次」「一律」「所有」「别再」「又」「说过」「早说了」这类意思，或者在指出你重复犯的错；②这件事换个任务、换个文件还会再碰到（通用的、反复碰到的工作习惯）。
+- 先记住为什么少记（鱼 1121）：没有到处都通用的规矩，只有在某类情况下拿来判断的依据；具体怎么做，到了场景里再看情况定。条数一多，重点就没了。
+- 什么时候记：三条都要满足。①用户自己说明了这是一条规矩：话里有「以后」「每次」「一律」「所有」「别再」「又」「说过」「早说了」这类意思，或者在指出你重复犯的错；②它是某一类情况下拿来判断的依据，下次碰到同类情况（换个任务、换个项目）还用得上；只在这一单成立的不记；③现有规矩里没说过同一件事（说过就照做，不再记）。
 - 用户只是对这一次的成品提修改意见（改语气、换个词、调长短、改标题、改配色），哪怕你觉得能推广，也不记，照改就行。
-- 怎么记：照常回复、照常把活干完，在这条回复的最后单独一行写，两段用「｜」隔开：
-  📌 记下了：<规矩一句话>｜适用：<什么时候照做>。不要就说「撤」
+- 怎么记：照常回复、照常把活干完，在这条回复的最后单独一行写，三段用「｜」隔开：
+  📌 记下了：<规矩一句话>｜适用：<什么时候照做>｜为什么：<防什么问题、为谁>。不要就说「撤」
   规矩：最多 16 个字，动词开头，一看就懂、没有歧义，不带这一单的人名文件名；它会原样当通知的第一排。
   适用：最多 20 个字，写清这条管到哪。只写这一次纠的那件事，不扩大。
-  例：📌 记下了：给路径单独一行不跟标点｜适用：给用户任何文件或文件夹路径时。不要就说「撤」
+  为什么：最多 30 个字，写这条防什么问题、为谁服务。说不出为什么，就别记——没有原因的规矩到了新场景没法判断用不用。
+  例：📌 记下了：给路径单独一行不跟标点｜适用：给用户任何文件或文件夹路径时｜为什么：她要直接点开，带标点复制就坏。不要就说「撤」
   这一行一写出来插件就自动存成规则，你不用跑任何命令。格式不对、超字数，插件不记，会让你当场补一行。
 - 这件事明显不分项目都成立（用户说了「以后都」「所有窗」「通用」，或者本来就是不分项目的做事习惯），写成「📌 记下了（所有项目）：…」；拿不准就不加，落在本项目。
-- 也不记：只在这一单成立的细节、闲聊里的澄清、玩笑、纯情绪。可记可不记的不记，宁可少记不要乱记。一条回复最多一行。没记就什么都别提，也别解释这条规矩。
+- 也不记：只在这一单成立的细节（某个工具、型号、路径、人名这类，写进记忆或文档就行）；闲聊里的澄清、玩笑、纯情绪。拿不准下次用不用得上就不记。新的一条得比现有的都要紧才记。可记可不记的不记，宁可少记不要乱记。一条回复最多一行。没记就什么都别提，也别解释这条规矩。
 - 用户回「撤」「不要这条」：插件会自动作废刚记的那条，你回一句撤掉了哪条就行。要撤更早的，跑 python3 "{script}" list 找到号，再 python3 "{script}" deprecate <号>。"""
 
 
@@ -158,27 +162,33 @@ def marks(text):
 
 
 def to_card(body):
-    """规矩｜适用：… -> (card, None), or (None, what is wrong). The gate: nothing else is a rule."""
-    m = SEG_RX.match(body)
+    """规矩｜适用：…｜为什么：… -> (card, None), or (None, what is wrong). The gate: nothing else is a rule."""
+    m = SEG3_RX.match(body)
     if not m:
-        return None, "没按两段写（规矩｜适用：…）"
-    t, ap = (re.sub(r"[。.；;，,\s]+$", "", m.group(k)).strip() for k in ("title", "applies"))
+        if SEG_RX.match(body):
+            return None, "少了第三段「为什么」（这条防什么问题、为谁服务）"
+        return None, "没按三段写（规矩｜适用：…｜为什么：…）"
+    t, ap, why = (re.sub(r"[。.；;，,\s]+$", "", m.group(k)).strip() for k in ("title", "applies", "why"))
     wrong = [f"{name} {len(v)} 字，超过 {cap}" for name, v, cap in
-             (("规矩", t, TITLE_MAX), ("适用", ap, SCOPE_MAX)) if len(v) > cap]
-    if not (t and ap):
+             (("规矩", t, TITLE_MAX), ("适用", ap, SCOPE_MAX), ("为什么", why, WHY_MAX)) if len(v) > cap]
+    if not (t and ap and why):
         wrong.append("有一段是空的")
     if wrong:
         return None, "；".join(wrong)
-    return {"title": t, "applies": ap, "trigger": ap, "action": t, "prohibit": ""}, None
+    return {"title": t, "applies": ap, "why": why, "trigger": ap, "action": t, "prohibit": ""}, None
 
 
 def rough_card(body):
     """Asked once and still malformed: keep it anyway, cut to size, marked 格式不全, the whole line kept."""
-    m = SEG_RX.match(body)
+    m = SEG3_RX.match(body) or SEG_RX.match(body)
     t, ap = (m.group("title").strip(), m.group("applies").strip()) if m else (body, "")
+    why = m.groupdict().get("why", "").strip() if m and m.groupdict().get("why") else ""
     cut = lambda v, n: v if len(v) <= n else v[:n - 1] + "…"  # noqa: E731
-    return {"title": cut(t, TITLE_MAX), "applies": cut(ap, SCOPE_MAX), "raw": body, "format": "格式不全",
+    card = {"title": cut(t, TITLE_MAX), "applies": cut(ap, SCOPE_MAX), "raw": body, "format": "格式不全",
             "trigger": ap or "类似情形", "action": body, "prohibit": ""}
+    if why:
+        card["why"] = cut(why, WHY_MAX)
+    return card
 
 
 def best_quote(message, card):
@@ -272,8 +282,9 @@ def fix_request(bad):
     lines = "；".join(f"「{b}」：{wrong}" for b, _, wrong in bad)
     return ("dialogue-to-rules：你刚写的 📌 那行插件没记，格式不对——" + lines + "。"
             "现在只补一行，前面的话不用重复：\n"
-            "📌 记下了：<规矩一句话>｜适用：<什么时候照做>。不要就说「撤」\n"
-            f"规矩最多 {TITLE_MAX} 字、动词开头、一看就懂；适用最多 {SCOPE_MAX} 字。"
+            "📌 记下了：<规矩一句话>｜适用：<什么时候照做>｜为什么：<防什么问题、为谁>。不要就说「撤」\n"
+            f"规矩最多 {TITLE_MAX} 字、动词开头、一看就懂；适用最多 {SCOPE_MAX} 字；为什么最多 {WHY_MAX} 字。"
+            "说不出为什么，就回一句「这条不记了」。"
             "原来带「（所有项目）」的照样带上。")
 
 

@@ -25,10 +25,11 @@ D2R = os.path.join(ROOT, "scripts", "d2r.py")
 
 CORRECTION = "你又把路径后面带了句号，以后给我路径都单独一行，后面别跟标点"
 RULE, WHERE = "给路径单独一行不跟标点", "给用户任何文件或文件夹路径时"
+WHY = "她要直接点开，带标点复制就坏"
 
 
-def line(rule=RULE, where=WHERE, everywhere=False):
-    return f"📌 记下了{'（所有项目）' if everywhere else ''}：{rule}｜适用：{where}。不要就说「撤」"
+def line(rule=RULE, where=WHERE, everywhere=False, why=WHY):
+    return f"📌 记下了{'（所有项目）' if everywhere else ''}：{rule}｜适用：{where}｜为什么：{why}。不要就说「撤」"
 
 
 REPLY = "好的，改了：\n/Users/x/a.md\n/Users/x\n\n" + line()
@@ -94,14 +95,14 @@ class LiveBase(unittest.TestCase):
 
 class ParseTest(unittest.TestCase):
     def test_the_line_and_its_variants(self):
-        self.assertEqual(live.marks(REPLY), [(f"{RULE}｜适用：{WHERE}", False)])
+        self.assertEqual(live.marks(REPLY), [(f"{RULE}｜适用：{WHERE}｜为什么：{WHY}", False)])
         self.assertEqual(live.marks("**📌 记下了（所有项目）**：派活先写来头｜适用：派任何活时。不要的话就说「撤」"),
                          [("派活先写来头｜适用：派任何活时", True)])
         self.assertEqual(live.marks("- 📌 记下了：额度<30%只收尾｜适用：开新活前。不要就说'撤'"),
                          [("额度<30%只收尾｜适用：开新活前", False)])
 
     def test_templates_code_and_other_pins_are_not_rules(self):
-        for text in ("📌 记下了：<规矩一句话>｜适用：<什么时候照做>。不要就说「撤」",
+        for text in ("📌 记下了：<规矩一句话>｜适用：<什么时候照做>｜为什么：<防什么问题、为谁>。不要就说「撤」",
                      "📌 记下了：……｜适用：……。不要就说「撤」",
                      "```\n" + line() + "\n```",
                      "📌 之前还记下了：甲｜适用：乙。不要就说「撤」",
@@ -109,22 +110,27 @@ class ParseTest(unittest.TestCase):
             self.assertEqual(live.marks(text), [], text)
 
     def test_gate_two_parts_within_limits(self):
-        card, wrong = live.to_card(f"{RULE}｜适用：{WHERE}")
+        card, wrong = live.to_card(f"{RULE}｜适用：{WHERE}｜为什么：{WHY}")
         self.assertIsNone(wrong)
         self.assertEqual((card["title"], card["applies"]), (RULE, WHERE))
-        self.assertEqual(live.to_card("派活先写来头 | 适用: 派任何活时。")[0]["applies"], "派任何活时")
+        self.assertEqual(card["why"], WHY)
+        self.assertEqual(live.to_card("派活先写来头 | 适用: 派任何活时 | 为什么: 免得对方再问。")[0]["applies"], "派任何活时")
         _, wrong = live.to_card("当给路径就单独一行、后面不跟标点")  # the 0.3.1 shape
-        self.assertIn("没按两段写", wrong)
-        _, wrong = live.to_card("给路径单独一行不跟标点｜适用：给路径时｜不适用：代码块")  # a third part
-        self.assertIn("没按两段写", wrong)
-        _, wrong = live.to_card("给用户的任何文件路径都要单独一行而且不跟标点｜适用：给路径时")
+        self.assertIn("没按三段写", wrong)
+        _, wrong = live.to_card("给路径单独一行不跟标点｜适用：给路径时｜不适用：代码块")  # a third part that is not 为什么
+        self.assertIn("没按三段写", wrong)
+        _, wrong = live.to_card("给路径单独一行不跟标点｜适用：给路径时")  # 0.3.2 两段：少了为什么
+        self.assertIn("少了第三段「为什么」", wrong)
+        _, wrong = live.to_card("给用户的任何文件路径都要单独一行而且不跟标点｜适用：给路径时｜为什么：要能点开")
         self.assertIn("规矩 22 字，超过 16", wrong)
-        _, wrong = live.to_card("给路径单独一行｜适用：给用户任何文件、文件夹、网址、命令输出里的路径时")
+        _, wrong = live.to_card("给路径单独一行｜适用：给用户任何文件、文件夹、网址、命令输出里的路径时｜为什么：要能点开")
         self.assertIn("适用 24 字，超过 20", wrong)
+        _, wrong = live.to_card("给路径单独一行｜适用：给路径时｜为什么：" + "她" * 31)
+        self.assertIn("为什么 31 字，超过 30", wrong)
 
     def test_long_message_evidence_is_the_closest_sentence_verbatim(self):
         msg = "今天先这样。" + "别的事情说了很多很多。" * 20 + "以后给我路径都单独一行，后面别跟标点。" + "收工吧。"
-        q = live.best_quote(msg, live.to_card(f"{RULE}｜适用：{WHERE}")[0])
+        q = live.best_quote(msg, live.to_card(f"{RULE}｜适用：{WHERE}｜为什么：{WHY}")[0])
         self.assertIn("路径都单独一行", q)
         self.assertIn(q, msg)
 
@@ -137,7 +143,7 @@ class CorrectionTurnTest(LiveBase):
         self.assertEqual((r["title"], r["applies"]), (RULE, WHERE))
         self.assertNotIn("format", r)
         self.assertEqual(r["evidence"]["quote"], CORRECTION)
-        self.assertIn(f"[r001] {RULE} ｜适用 {WHERE} ｜证据", self.md())  # default-on: in CLAUDE.md, nobody answered
+        self.assertIn(f"[r001] {RULE} ｜适用 {WHERE} ｜为什么 {WHY} ｜证据", self.md())  # default-on: in CLAUDE.md, nobody answered
         self.assertEqual(self.md(True), "")
 
     def test_all_projects_goes_global(self):
@@ -200,8 +206,8 @@ class GateTest(LiveBase):
     def test_missing_part_is_sent_back_and_the_fixed_line_is_written(self):
         out = self.turn(CORRECTION, "好的。\n📌 记下了：当给路径就单独一行、后面不跟标点。不要就说「撤」")
         self.assertEqual(out["decision"], "block")  # the model goes on in this same turn
-        self.assertIn("没按两段写", out["reason"])
-        self.assertIn("📌 记下了：<规矩一句话>｜适用：<什么时候照做>。不要就说「撤」", out["reason"])
+        self.assertIn("没按三段写", out["reason"])
+        self.assertIn("📌 记下了：<规矩一句话>｜适用：<什么时候照做>｜为什么：<防什么问题、为谁>。不要就说「撤」", out["reason"])
         self.assertEqual(d2r.load(False), [])  # nothing written yet
         self.assertEqual(self.notified(), [])
         self.assertIsNone(self.hook("Stop", last_assistant_message=line(), stop_hook_active=True))
@@ -209,8 +215,18 @@ class GateTest(LiveBase):
         self.assertEqual((r["title"], r.get("format"), r["evidence"]["quote"]), (RULE, None, CORRECTION))
         self.assertIsNotNone(self.prompt("撤"))  # 撤 still takes back what this turn wrote
 
+    def test_no_why_is_sent_back(self):
+        """1121 鱼：每一个原则都要有其设定的原因和适用场景——两段（没有为什么）的不收，退回去补。"""
+        out = self.turn(CORRECTION, f"好的。\n📌 记下了：{RULE}｜适用：{WHERE}。不要就说「撤」")
+        self.assertEqual(out["decision"], "block")
+        self.assertIn("少了第三段「为什么」", out["reason"])
+        self.assertEqual(d2r.load(False), [])
+        self.assertIsNone(self.hook("Stop", last_assistant_message=line(), stop_hook_active=True))
+        r, = self.active()
+        self.assertEqual(r["why"], WHY)
+
     def test_too_long_is_sent_back_once_then_kept_cut_and_marked(self):
-        long_line = "📌 记下了：给用户的任何文件路径都要单独一行而且不跟标点｜适用：给路径时。不要就说「撤」"
+        long_line = "📌 记下了：给用户的任何文件路径都要单独一行而且不跟标点｜适用：给路径时｜为什么：要能点开。不要就说「撤」"
         out = self.turn(CORRECTION, "好。\n" + long_line)
         self.assertIn("规矩 22 字，超过 16", out["reason"])
         self.assertIsNone(self.hook("Stop", last_assistant_message="好，我再想想。", stop_hook_active=True))
@@ -218,7 +234,7 @@ class GateTest(LiveBase):
         self.assertEqual(r["format"], "格式不全")
         self.assertEqual(len(r["title"]), live.TITLE_MAX)
         self.assertTrue(r["title"].endswith("…"))
-        self.assertEqual(r["raw"], "给用户的任何文件路径都要单独一行而且不跟标点｜适用：给路径时")
+        self.assertEqual(r["raw"], "给用户的任何文件路径都要单独一行而且不跟标点｜适用：给路径时｜为什么：要能点开")
         self.assertIn(f"[r001] {r['raw']} ｜证据", self.md())  # the model reads the whole line
         self.assertIn("格式不全", d2r.read_text(os.path.join(self.home, ".d2r", "规矩本.html")))
 
@@ -487,7 +503,7 @@ class SessionStartTest(LiveBase):
 
     def test_the_convention_is_told_once_per_window_with_only_one_word_to_know(self):
         text = self.start()
-        self.assertIn("📌 记下了：<规矩一句话>｜适用：<什么时候照做>。不要就说「撤」", text)
+        self.assertIn("📌 记下了：<规矩一句话>｜适用：<什么时候照做>｜为什么：<防什么问题、为谁>。不要就说「撤」", text)
         self.assertNotIn("不适用", text)
         self.assertIn("（所有项目）", text)
         for word in ("回 y", "／ p", "g 改", "promote", "合并"):

@@ -174,12 +174,16 @@ def render_rule(r):
     if r.get("title"):  # 0.3.2 cards: 规矩｜适用 (a card that came in malformed keeps the whole line)
         text = one_line(r.get("raw")) if r.get("raw") else "{} ｜适用 {}".format(
             one_line(r["title"]), one_line(r.get("applies")) or "—")
+        if r.get("why") and not r.get("raw"):
+            text += " ｜为什么 " + one_line(r["why"])
         return "- [{}] {} ｜证据「{}」｜范围 {}".format(r["id"], text, one_line(r["evidence"]["quote"]), r["scope"])
     what = []
     if r.get("action"):
         what.append("做 " + one_line(r["action"]))
     if r.get("prohibit"):
         what.append("不做 " + one_line(r["prohibit"]))
+    if r.get("why"):
+        what.append("为什么 " + one_line(r["why"]))
     return "- [{}] 当{} → {} ｜证据「{}」｜范围 {}".format(
         r["id"], one_line(r["trigger"]), " / ".join(what),
         one_line(r["evidence"]["quote"]), r["scope"])
@@ -305,6 +309,7 @@ def book_html():
         if r.get("title"):  # 0.3.2: 规矩 / 适用 / 证据原话
             body = (f'<dl class="cols"><dt>规矩</dt><dd class="rule">{html.escape(brief(r))}</dd>'
                     f'<dt>适用</dt><dd>{html.escape(r.get("applies") or "—")}</dd>'
+                    + (f'<dt>为什么</dt><dd>{html.escape(r["why"])}</dd>' if r.get("why") else "")
                     + (f'<dt>原话</dt><dd>{html.escape(r["raw"])}</dd>' if r.get("raw") else "")
                     + f'<dt>证据原话</dt><dd class="quote">「{html.escape(one_line(r["evidence"].get("quote")))}」</dd></dl>')
         else:  # older rules are shown as they were written
@@ -422,7 +427,7 @@ def add_rule(card, host, source="manual", session=None):
         "added_at": datetime.datetime.now().isoformat(timespec="milliseconds"),  # orders the rule book
         "source": source,
     }
-    for k in ("title", "applies", "raw", "format"):  # 0.3.2 cards
+    for k in ("title", "applies", "why", "raw", "format"):  # 0.3.2 cards；why 是 1121 加的
         if one_line(card.get(k)):
             rule[k] = one_line(card[k])
     snapshot(is_global)
@@ -571,6 +576,21 @@ def cmd_migrate(args):
         print("候选池是空的，没动")
 
 
+def cmd_why(args):
+    """给一条已有规矩补上「为什么」（鱼 1121：每一个原则都要有其设定的原因和适用场景）。"""
+    rid = norm_id(args.id)
+    is_global = rid.startswith("g")
+    rules = load(is_global)
+    hit = [r for r in rules if r["id"] == rid]
+    if not hit:
+        raise SystemExit(f"没有 {rid}")
+    snapshot(is_global)
+    hit[0]["why"] = one_line(args.text)
+    save(is_global, rules)
+    render(args.host)
+    print(f"{rid} 补上为什么：{hit[0]['why']}")
+
+
 def cmd_deprecate(args):
     if bool(args.id) == bool(args.all_except is not None):
         raise SystemExit("deprecate 要么给一个 id，要么给 --all-except，二选一")
@@ -660,11 +680,14 @@ def main(argv=None):
     sub.add_parser("retract")
     sub.add_parser("migrate")
     sub.add_parser("book")
+    w = sub.add_parser("why", help="给已有规矩补上「为什么」")
+    w.add_argument("id")
+    w.add_argument("text")
     args = p.parse_args(argv)
     {"add": cmd_add, "deprecate": cmd_deprecate, "list": cmd_list,
      "undo": cmd_undo, "render": cmd_render, "candidates": cmd_candidates,
      "promote": cmd_promote, "drop": cmd_drop, "retract": cmd_retract,
-     "migrate": cmd_migrate, "book": cmd_book}[args.cmd](args)
+     "migrate": cmd_migrate, "book": cmd_book, "why": cmd_why}[args.cmd](args)
 
 
 if __name__ == "__main__":
